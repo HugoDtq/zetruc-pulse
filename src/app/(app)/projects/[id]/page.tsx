@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import BrandEditDialog from "@/components/projects/BrandEditDialog";
 import DomainCreateDialog from "@/components/projects/DomainCreateDialog";
 import DomainCard from "@/components/projects/DomainCard";
+import ReputationAnalysis from "@/components/projects/ReputationAnalysis";
 
 const prisma = new PrismaClient();
 
@@ -85,6 +86,9 @@ export default async function ProjectPage({ params }: PageProps) {
           </div>
         )}
       </section>
+
+      {/* Analyse IA */}
+      <ReputationAnalysis project={project} />
     </div>
   );
 }
