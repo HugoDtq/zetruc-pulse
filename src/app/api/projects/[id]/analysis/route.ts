@@ -243,9 +243,11 @@ async function callOpenAIResponses({
         ],
       },
     ],
-    response_format: {
-      type: "json_schema" as const,
-      json_schema: REPUTATION_ANALYSIS_JSON_SCHEMA,
+    text: {
+      format: {
+        type: "json_schema" as const,
+        json_schema: REPUTATION_ANALYSIS_JSON_SCHEMA,
+      },
     },
     reasoning: {},
     tools: [
