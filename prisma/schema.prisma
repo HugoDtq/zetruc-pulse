@@ -1,0 +1,102 @@
+// prisma/schema.prisma
+
+datasource db {
+  provider = "sqlite" // change vers "postgresql" / "mysql" si besoin
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+//// ─────────────────────────────
+//// Enums
+//// ─────────────────────────────
+
+enum Group {
+  ADMINISTRATEUR
+  AGENCE
+  UTILISATEUR
+}
+
+enum LLMProvider {
+  OPENAI
+  ANTHROPIC
+  GEMINI
+  PERPLEXITY
+  GROK
+}
+
+//// ─────────────────────────────
+//// Modèles
+//// ─────────────────────────────
+
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  name         String?
+  passwordHash String
+  group        Group   @default(UTILISATEUR)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  projects   Project[]
+  llmApiKeys LlmApiKey[] @relation("ApiKeyCreator")
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id])
+
+  countryCode String?
+  city        String?
+  websiteUrl  String?
+  description String?
+  aliasesJson String  @default("[]")
+  logoUrl     String?
+
+  domains   Domain[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt @default(now()) // 👈 AJOUTE @default(now())
+}
+
+
+model Domain {
+  id String @id @default(cuid())
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id])
+
+  name        String
+  notes       String?
+  competitors String  @default("[]") // JSON.stringify(string[])
+  suggestions String  @default("[]") // (optionnel) suggestions IA conservées
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model LlmApiKey {
+  id       String      @id @default(cuid())
+  provider LLMProvider @unique
+
+  // stockage chiffré (AES-256-GCM)
+  keyCiphertext String
+  keyIv         String
+  keyTag        String
+
+  // affichage: 4 derniers caractères de la clé
+  last4 String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // traçabilité (optionnel)
+  createdById String?
+  createdBy   User?   @relation("ApiKeyCreator", fields: [createdById], references: [id])
+}
