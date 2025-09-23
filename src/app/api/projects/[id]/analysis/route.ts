@@ -246,7 +246,8 @@ async function callOpenAIResponses({
     text: {
       format: {
         type: "json_schema" as const,
-        json_schema: REPUTATION_ANALYSIS_JSON_SCHEMA,
+        name: REPUTATION_ANALYSIS_JSON_SCHEMA.name,
+        json_schema: REPUTATION_ANALYSIS_JSON_SCHEMA.schema,
       },
     },
     reasoning: {},
