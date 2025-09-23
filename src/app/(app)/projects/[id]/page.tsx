@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import BrandEditDialog from "@/components/projects/BrandEditDialog";
 import DomainCreateDialog from "@/components/projects/DomainCreateDialog";
 import DomainCard from "@/components/projects/DomainCard";
+import ProjectAnalysisSection from "@/components/projects/ProjectAnalysisSection";
 
 const prisma = new PrismaClient();
 
@@ -69,22 +70,41 @@ export default async function ProjectPage({ params }: PageProps) {
       {/* Domaines d'activité */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Domaines d'activité</h2>
+          <h2 className="text-lg font-semibold">Domaines d&apos;activité</h2>
           <DomainCreateDialog projectId={project.id} />
         </div>
 
         {domains.length === 0 ? (
           <div className="rounded-2xl border p-6 text-center text-sm opacity-70 dark:border-zinc-800">
-            Aucun Domaine d'activité pour l’instant — commencez par en ajouter un.
+            Aucun Domaine d&apos;activité pour l’instant — commencez par en ajouter un.
           </div>
         ) : (
           <div className="grid gap-3">
             {domains.map((d) => (
-              <DomainCard key={d.id} projectId={project.id} domain={d as any} />
+              <DomainCard
+                key={d.id}
+                projectId={project.id}
+                domain={{
+                  id: d.id,
+                  name: d.name,
+                  notes: d.notes,
+                  competitors: d.competitors,
+                  updatedAt:
+                    d.updatedAt instanceof Date ? d.updatedAt.toISOString() : String(d.updatedAt),
+                }}
+              />
             ))}
           </div>
         )}
       </section>
+
+      <ProjectAnalysisSection
+        projectId={project.id}
+        projectName={project.name}
+        websiteUrl={project.websiteUrl ?? undefined}
+        city={project.city ?? undefined}
+        domainNames={domains.map((d) => d.name).filter(Boolean)}
+      />
     </div>
   );
 }
