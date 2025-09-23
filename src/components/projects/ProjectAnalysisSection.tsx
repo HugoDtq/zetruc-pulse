@@ -2,47 +2,33 @@
 
 import { useMemo, useState } from "react";
 
-type QuestionAnalysis = {
-  mention?: string;
-  justification?: string;
-  competitors?: string;
-  extras?: string[];
-  raw: string;
-};
+import type {
+  ReputationQuestion,
+  ReputationReport,
+  ReputationVisibilityAnalysis,
+} from "@/lib/reputation-report";
+import { sanitizeReputationReport } from "@/lib/reputation-report";
 
-type QuestionItem = {
-  question: string;
-  analysis?: QuestionAnalysis;
-};
-
-type ParsedReport = {
-  raw: string;
-  part1?: string;
-  part2?: string;
-  part3Intro?: string;
-  questionIntro?: string;
-  analysisIntro?: string;
-  part31Raw?: string;
-  part32Raw?: string;
-  questions: QuestionItem[];
-  leftoverAnalyses: string[];
-  notice?: string;
+type AnalysisContext = {
+  companyName?: string;
+  city?: string | null;
+  website?: string | null;
+  competitors?: string[];
 };
 
 type AnalysisState = {
-  parsed: ParsedReport;
+  report: ReputationReport;
+  raw?: unknown;
+  rawText?: string | null;
   prompt?: string;
-  context?: {
-    companyName?: string;
-    city?: string | null;
-    website?: string | null;
-    competitors?: string[];
-  };
+  context?: AnalysisContext;
   fetchedAt: number;
 };
 
 type AnalysisSuccessResponse = {
   result?: unknown;
+  raw?: unknown;
+  rawText?: unknown;
   prompt?: unknown;
   context?: unknown;
 };
@@ -60,317 +46,23 @@ type ProjectAnalysisSectionProps = {
   domainNames?: string[];
 };
 
+type QuestionAccordionItem = {
+  question: string;
+  contexte?: string;
+  analysis?: ReputationVisibilityAnalysis;
+};
+
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-function normalizeNewlines(text: string) {
-  return text.replace(/\r\n/g, "\n");
-}
-
-function splitSections(raw: string) {
-  const normalized = normalizeNewlines(raw).trim();
-  let body = normalized;
-  let notice = "";
-  const noticeRegex = /Ce rapport est une synthèse générée par une IA[\s\S]*$/i;
-  const noticeMatch = body.match(noticeRegex);
-  if (noticeMatch && noticeMatch.index !== undefined) {
-    notice = noticeMatch[0].trim();
-    body = body.slice(0, noticeMatch.index).trim();
-  }
-
-  const sections: Record<string, string> = {};
-  const regex = /Partie\s+(\d)[\s\S]*?(?=Partie\s+\d|$)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(body)) !== null) {
-    sections[match[1]] = match[0].trim();
-  }
-
-  const idxPart1 = body.search(/Partie\s+1/i);
-  if (idxPart1 > 0) {
-    const preface = body.slice(0, idxPart1).trim();
-    if (preface) {
-      const part1 = sections["1"] ?? body.slice(idxPart1).trim();
-      sections["1"] = `${preface}\n\n${part1}`.trim();
-    }
-  }
-
-  if (!sections["1"] && body) {
-    sections["1"] = body;
-  }
-
-  return { sections, notice };
-}
-
-function splitPart3(section?: string) {
-  if (!section) {
-    return { intro: "", subsections: {} as Record<string, string> };
-  }
-  const normalized = normalizeNewlines(section).trim();
-  const idx31 = normalized.search(/3\.1/i);
-  let intro = "";
-  let body = normalized;
-  if (idx31 > 0) {
-    intro = normalized.slice(0, idx31).trim();
-    body = normalized.slice(idx31).trim();
-  }
-
-  const subsections: Record<string, string> = {};
-  const regex = /3\.(\d)[\s\S]*?(?=3\.\d|$)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(body)) !== null) {
-    subsections[match[1]] = match[0].trim();
-  }
-
-  if (!subsections["1"] && body) {
-    subsections["1"] = body;
-  }
-
-  return { intro, subsections };
-}
-
-type ParsedQuestions = {
-  intro?: string;
-  questions: string[];
-  raw?: string;
-};
-
-type ParsedAnalysis = {
-  question?: string;
-  mention?: string;
-  justification?: string;
-  competitors?: string;
-  extras?: string[];
-  raw: string;
-  matched?: boolean;
-};
-
-type ParsedAnalyses = {
-  intro?: string;
-  analyses: ParsedAnalysis[];
-  raw?: string;
-};
-
-function extractQuestions(section?: string): ParsedQuestions {
-  if (!section) return { questions: [], raw: section };
-  const normalized = normalizeNewlines(section).trim();
-  const withoutHeader = normalized.replace(/^3\.1[^\n]*\n?/, "").trim();
-  const lines = withoutHeader.split("\n");
-  const introParts: string[] = [];
-  const questions: string[] = [];
-  let current: string | null = null;
-  const questionStart = /^((?:\d+[\).\-\s]*)|(?:[-*•]\s+)|(?:Q\d+[:.)-]+))\s*(.+)/i;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      if (current) {
-        questions.push(current.trim());
-        current = null;
-      }
-      continue;
-    }
-    const match = trimmed.match(questionStart);
-    if (match) {
-      if (current) {
-        questions.push(current.trim());
-      }
-      current = match[2].trim();
-    } else if (current) {
-      current = `${current} ${trimmed}`;
-    } else {
-      introParts.push(trimmed);
-    }
-  }
-  if (current) {
-    questions.push(current.trim());
-  }
-
-  const cleaned = questions
-    .map((q) => q.replace(/\s+/g, " ").trim())
-    .filter((q, idx, arr) => q && arr.indexOf(q) === idx);
-
-  const intro = introParts.join(" ").trim();
-
-  return { intro: intro || undefined, questions: cleaned, raw: normalized };
-}
-
-function extractAnalyses(section?: string): ParsedAnalyses {
-  if (!section) return { analyses: [], raw: section };
-  const normalized = normalizeNewlines(section).trim();
-  const withoutHeader = normalized.replace(/^3\.2[^\n]*\n?/, "").trim();
-  const blocks = withoutHeader.split(/\n\s*\n/).map((block) => block.trim()).filter(Boolean);
-
-  const analyses: ParsedAnalysis[] = [];
-  const introParts: string[] = [];
-  let seenAnalysis = false;
-
-  for (const block of blocks) {
-    const hasKeywords = /Mention probable|Justification|Concurrents?/i.test(block);
-    if (!hasKeywords && !seenAnalysis) {
-      introParts.push(block);
-      continue;
-    }
-    seenAnalysis = true;
-
-    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
-    if (!lines.length) continue;
-
-    let questionLine = "";
-    const restLines: string[] = [];
-
-    for (const line of lines) {
-      const cleanLine = line.replace(/^[-*•]\s*/, "").trim();
-      if (!questionLine) {
-        if (/^(mention probable|justification|concurr)/i.test(cleanLine)) {
-          restLines.push(cleanLine);
-          continue;
-        }
-        const match = cleanLine.match(/^((?:\d+[\).\-\s]*)|(?:Q\d+[:.)-]+))\s*(.+)/i);
-        questionLine = match ? match[2].trim() : cleanLine;
-      } else {
-        restLines.push(cleanLine);
-      }
-    }
-
-    const extras: string[] = [];
-    let mention: string | undefined;
-    let justification: string | undefined;
-    let competitors: string | undefined;
-
-    for (const line of restLines) {
-      const lower = line.toLowerCase();
-      if (lower.startsWith("mention probable")) {
-        const value = line.split(/[:\-–]/).slice(1).join(":").trim();
-        if (value) mention = value;
-      } else if (lower.startsWith("justification")) {
-        const value = line.split(/[:\-–]/).slice(1).join(":").trim();
-        if (value) justification = value;
-      } else if (lower.startsWith("concurr")) {
-        const value = line.split(/[:\-–]/).slice(1).join(":").trim();
-        if (value) competitors = value;
-      } else if (line) {
-        extras.push(line);
-      }
-    }
-
-    analyses.push({
-      question: questionLine || undefined,
-      mention,
-      justification,
-      competitors,
-      extras: extras.length ? extras : undefined,
-      raw: block,
-    });
-  }
-
-  const intro = introParts.join("\n\n").trim();
-
-  return { intro: intro || undefined, analyses, raw: withoutHeader };
-}
-
-function normalizeQuestionText(text: string) {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function matchQuestions(questions: string[], analyses: ParsedAnalysis[]) {
-  const items: QuestionItem[] = questions.map((question) => ({ question }));
-  const used = new Set<number>();
-
-  function attach(index: number, analysis: ParsedAnalysis) {
-    items[index].analysis = {
-      mention: analysis.mention,
-      justification: analysis.justification,
-      competitors: analysis.competitors,
-      extras: analysis.extras,
-      raw: analysis.raw,
-    };
-    used.add(index);
-    analysis.matched = true;
-  }
-
-  const normalizedMap = new Map<string, number[]>();
-  questions.forEach((question, index) => {
-    const norm = normalizeQuestionText(question);
-    if (!normalizedMap.has(norm)) normalizedMap.set(norm, []);
-    normalizedMap.get(norm)!.push(index);
-  });
-
-  analyses.forEach((analysis) => {
-    if (!analysis.question) return;
-    const norm = normalizeQuestionText(analysis.question);
-    const indexes = normalizedMap.get(norm);
-    if (indexes) {
-      const available = indexes.find((idx) => !used.has(idx));
-      if (available !== undefined) {
-        attach(available, analysis);
-        return;
-      }
-    }
-    const fallback = questions.findIndex((question, idx) => {
-      if (used.has(idx)) return false;
-      const normQuestion = normalizeQuestionText(question);
-      return normQuestion.includes(norm) || norm.includes(normQuestion);
-    });
-    if (fallback >= 0) {
-      attach(fallback, analysis);
-    }
-  });
-
-  analyses.forEach((analysis) => {
-    if (analysis.matched) return;
-    const idx = questions.findIndex((_, index) => !used.has(index));
-    if (idx >= 0) attach(idx, analysis);
-  });
-
-  const leftovers = analyses
-    .filter((analysis) => !analysis.matched)
-    .map((analysis) => analysis.raw)
-    .filter(Boolean);
-
-  return { items, leftovers };
-}
-
-function parseReport(raw: string): ParsedReport {
-  const { sections, notice } = splitSections(raw);
-  const part1 = sections["1"]?.trim();
-  const part2 = sections["2"]?.trim();
-  const part3 = sections["3"]?.trim();
-
-  const { intro: part3Intro, subsections } = splitPart3(part3);
-  const questionsSection = subsections["1"];
-  const analysesSection = subsections["2"];
-
-  const parsedQuestions = extractQuestions(questionsSection);
-  const parsedAnalyses = extractAnalyses(analysesSection);
-  const { items, leftovers } = matchQuestions(parsedQuestions.questions, parsedAnalyses.analyses);
-
-  return {
-    raw,
-    part1,
-    part2,
-    part3Intro: part3Intro || undefined,
-    questionIntro: parsedQuestions.intro,
-    analysisIntro: parsedAnalyses.intro,
-    part31Raw: parsedQuestions.raw,
-    part32Raw: analysesSection,
-    questions: items,
-    leftoverAnalyses: leftovers,
-    notice: notice || undefined,
-  };
-}
-
-function sanitizeContext(value: unknown): AnalysisState["context"] | undefined {
+function sanitizeContext(value: unknown): AnalysisContext | undefined {
   if (!value || typeof value !== "object") return undefined;
   const ctx = value as Record<string, unknown>;
-  const sanitized: AnalysisState["context"] = {};
+  const sanitized: AnalysisContext = {};
 
   if (typeof ctx.companyName === "string" && ctx.companyName.trim()) {
-    sanitized.companyName = ctx.companyName;
+    sanitized.companyName = ctx.companyName.trim();
   }
 
   if (typeof ctx.city === "string" || ctx.city === null) {
@@ -378,7 +70,7 @@ function sanitizeContext(value: unknown): AnalysisState["context"] | undefined {
   }
 
   if (typeof ctx.website === "string" && ctx.website.trim()) {
-    sanitized.website = ctx.website;
+    sanitized.website = ctx.website.trim();
   }
 
   if (Array.isArray(ctx.competitors)) {
@@ -395,6 +87,72 @@ function sanitizeContext(value: unknown): AnalysisState["context"] | undefined {
   }
 
   return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+function normalizeQuestionText(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function matchQuestions(
+  questions: ReputationQuestion[],
+  analyses: ReputationVisibilityAnalysis[]
+): { items: QuestionAccordionItem[]; leftovers: ReputationVisibilityAnalysis[] } {
+  const items: QuestionAccordionItem[] = questions.map((item) => ({
+    question: item.question,
+    contexte: item.contexte,
+  }));
+
+  const used = new Set<number>();
+  const normalizedMap = new Map<string, number[]>();
+
+  questions.forEach((item, index) => {
+    const norm = normalizeQuestionText(item.question);
+    if (!normalizedMap.has(norm)) normalizedMap.set(norm, []);
+    normalizedMap.get(norm)!.push(index);
+  });
+
+  const leftovers: ReputationVisibilityAnalysis[] = [];
+
+  function attach(index: number, analysis: ReputationVisibilityAnalysis) {
+    items[index].analysis = {
+      question: analysis.question,
+      mentionProbable: analysis.mentionProbable,
+      justification: analysis.justification,
+      concurrents: [...analysis.concurrents],
+      commentaires: analysis.commentaires,
+    };
+    used.add(index);
+  }
+
+  analyses.forEach((analysis) => {
+    const norm = normalizeQuestionText(analysis.question);
+    const candidates = normalizedMap.get(norm);
+    if (candidates) {
+      const available = candidates.find((idx) => !used.has(idx));
+      if (available !== undefined) {
+        attach(available, analysis);
+        return;
+      }
+    }
+
+    const fallback = items.findIndex((item, idx) => {
+      if (used.has(idx)) return false;
+      const normQuestion = normalizeQuestionText(item.question);
+      return normQuestion.includes(norm) || norm.includes(normQuestion);
+    });
+
+    if (fallback >= 0) {
+      attach(fallback, analysis);
+    } else {
+      leftovers.push(analysis);
+    }
+  });
+
+  return { items, leftovers };
 }
 
 export default function ProjectAnalysisSection({
@@ -415,6 +173,16 @@ export default function ProjectAnalysisSection({
     return `${domainNames.slice(0, 3).join(", ")} (+${domainNames.length - 3} autres)`;
   }, [domainNames]);
 
+  const questionMatches = useMemo(() => {
+    if (!analysis) {
+      return { items: [] as QuestionAccordionItem[], leftovers: [] as ReputationVisibilityAnalysis[] };
+    }
+    return matchQuestions(
+      analysis.report.part3.generation.questions,
+      analysis.report.part3.visibilite.analyses
+    );
+  }, [analysis]);
+
   async function runAnalysis() {
     setLoading(true);
     setError(null);
@@ -423,20 +191,24 @@ export default function ProjectAnalysisSection({
         method: "POST",
         headers: { "content-type": "application/json" },
       });
-      const raw = (await response.json().catch(() => ({}))) as AnalysisSuccessResponse & AnalysisErrorResponse;
+      const raw = (await response.json().catch(() => ({}))) as AnalysisSuccessResponse &
+        AnalysisErrorResponse;
       if (!response.ok) {
-        const message = typeof raw.error === "string" && raw.error.trim() ? raw.error : "Échec de l'analyse";
+        const message =
+          typeof raw.error === "string" && raw.error.trim() ? raw.error : "Échec de l&apos;analyse";
         const detail = typeof raw.detail === "string" && raw.detail.trim() ? raw.detail : undefined;
         throw new Error(detail ? `${message} (${detail})` : message);
       }
 
-      const resultText = typeof raw.result === "string" ? raw.result : "";
-      if (!resultText.trim()) {
-        throw new Error("La réponse de l'IA est vide.");
+      const report = sanitizeReputationReport(raw.result);
+      if (!report) {
+        throw new Error("Format de rapport inattendu.");
       }
-      const parsed = parseReport(resultText);
+
       setAnalysis({
-        parsed,
+        report,
+        raw: raw.raw ?? raw.result,
+        rawText: typeof raw.rawText === "string" ? raw.rawText : null,
         prompt: typeof raw.prompt === "string" ? raw.prompt : undefined,
         context: sanitizeContext(raw.context),
         fetchedAt: Date.now(),
@@ -457,10 +229,20 @@ export default function ProjectAnalysisSection({
           <p className="text-sm opacity-70">
             Génère un rapport complet (identité, positionnement, visibilité IA) en utilisant le prompt fourni.
           </p>
-          <div className="text-xs opacity-60">
-            <div><span className="font-semibold">Entreprise :</span> {projectName}</div>
-            {city && <div><span className="font-semibold">Ville :</span> {city}</div>}
-            {websiteUrl && <div><span className="font-semibold">Site :</span> {websiteUrl}</div>}
+          <div className="text-xs opacity-60 space-y-1">
+            <div>
+              <span className="font-semibold">Entreprise :</span> {projectName}
+            </div>
+            {city && (
+              <div>
+                <span className="font-semibold">Ville :</span> {city}
+              </div>
+            )}
+            {websiteUrl && (
+              <div>
+                <span className="font-semibold">Site :</span> {websiteUrl}
+              </div>
+            )}
             <div>
               <span className="font-semibold">Domaines d&apos;activité :</span> {domainSummary}
             </div>
@@ -489,10 +271,9 @@ export default function ProjectAnalysisSection({
       )}
 
       {analysis ? (
-        <div className="rounded-2xl border p-4 dark:border-zinc-800">
-          <div className="mb-3 text-xs opacity-60">
-            Rapport généré le {new Date(analysis.fetchedAt).toLocaleString()}
-          </div>
+        <div className="rounded-2xl border p-4 space-y-4 dark:border-zinc-800">
+          <div className="text-xs opacity-60">Rapport généré le {new Date(analysis.fetchedAt).toLocaleString()}</div>
+
           <div className="flex flex-wrap gap-2 border-b pb-3">
             <button
               type="button"
@@ -532,28 +313,193 @@ export default function ProjectAnalysisSection({
             </button>
           </div>
 
-          <div className="mt-4 text-sm leading-6">
-            {activeTab === "part1" && (
-              <div className="whitespace-pre-wrap">{analysis.parsed.part1 ?? "Aucune donnée pour cette section."}</div>
-            )}
-            {activeTab === "part2" && (
-              <div className="whitespace-pre-wrap">
-                {analysis.parsed.part2 && analysis.parsed.part2.trim()
-                  ? analysis.parsed.part2
-                  : "Aucune comparaison concurrentielle fournie (vérifiez que des concurrents sont renseignés)."}
-              </div>
-            )}
-            {activeTab === "part3" && (
-              <div className="space-y-4">
-                {analysis.parsed.part3Intro && (
-                  <div className="whitespace-pre-wrap">{analysis.parsed.part3Intro}</div>
+          {activeTab === "part1" && (
+            <div className="space-y-6">
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold uppercase tracking-wide">1.1 Synthèse de l&apos;identité</h3>
+                <ul className="list-disc space-y-1 pl-5 text-sm">
+                  {analysis.report.part1.syntheseIdentite.map((line, idx) => (
+                    <li key={idx}>{line}</li>
+                  ))}
+                </ul>
+              </section>
+
+              <section className="space-y-3">
+                <div className="text-sm font-semibold uppercase tracking-wide">1.2 Nuage de mots pondéré</div>
+                <div className="flex flex-wrap gap-2">
+                  {analysis.report.part1.nuageMots
+                    .slice()
+                    .sort((a, b) => b.poids - a.poids)
+                    .map((entry) => (
+                      <span
+                        key={`${entry.mot}-${entry.poids}`}
+                        className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs dark:border-zinc-700"
+                      >
+                        <span className="font-medium">{entry.mot}</span>
+                        <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold dark:bg-zinc-800">
+                          {Math.round(entry.poids)}
+                        </span>
+                      </span>
+                    ))}
+                </div>
+              </section>
+
+              <section className="space-y-2">
+                <div className="text-sm font-semibold uppercase tracking-wide">1.3 Analyse de sentiment global</div>
+                <div className="rounded-xl bg-gray-50 p-3 text-sm leading-6 dark:bg-zinc-900">
+                  <div>
+                    <span className="font-semibold">Évaluation :</span> {analysis.report.part1.sentimentGlobal.evaluation}
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap">
+                    <span className="font-semibold">Justification :</span> {analysis.report.part1.sentimentGlobal.justification}
+                  </div>
+                  {analysis.report.part1.sentimentGlobal.exemples && (
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                      {analysis.report.part1.sentimentGlobal.exemples.map((exemple, idx) => (
+                        <li key={idx}>{exemple}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {analysis.report.part1.sentimentGlobal.details && (
+                    <div className="mt-2 text-xs opacity-70">
+                      {analysis.report.part1.sentimentGlobal.details}
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              <section className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="text-sm font-semibold uppercase tracking-wide">1.4 Forces perçues</div>
+                  <ul className="list-disc space-y-1 pl-5 text-sm">
+                    {analysis.report.part1.forces.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="space-y-2">
+                  <div className="text-sm font-semibold uppercase tracking-wide">1.4 Faiblesses perçues</div>
+                  <ul className="list-disc space-y-1 pl-5 text-sm">
+                    {analysis.report.part1.faiblesses.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              </section>
+
+              <section className="space-y-2">
+                <div className="text-sm font-semibold uppercase tracking-wide">1.5 Sujets de discussion</div>
+                <ul className="list-disc space-y-1 pl-5 text-sm">
+                  {analysis.report.part1.sujets.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </section>
+
+              <section className="space-y-2">
+                <div className="text-sm font-semibold uppercase tracking-wide">1.6 Pistes d&apos;amélioration</div>
+                <div className="space-y-3">
+                  {analysis.report.part1.recommandations.map((item, idx) => (
+                    <div key={idx} className="rounded-xl border p-3 text-sm dark:border-zinc-800">
+                      <div>
+                        <span className="font-semibold">Faiblesse :</span> {item.faiblesse}
+                      </div>
+                      <div className="mt-1">
+                        <span className="font-semibold">Action recommandée :</span> {item.action}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          )}
+
+          {activeTab === "part2" && (
+            <div className="space-y-4">
+              {analysis.report.part2 ? (
+                <>
+                  {analysis.report.part2.resume && (
+                    <div className="rounded-xl bg-gray-50 p-3 text-sm leading-6 dark:bg-zinc-900">
+                      {analysis.report.part2.resume}
+                    </div>
+                  )}
+                  {analysis.report.part2.details && analysis.report.part2.details.length > 0 ? (
+                    <div className="grid gap-3">
+                      {analysis.report.part2.details.map((detail, idx) => (
+                        <div key={idx} className="rounded-xl border p-3 text-sm space-y-2 dark:border-zinc-800">
+                          {detail.acteur && (
+                            <div>
+                              <span className="font-semibold">Acteur :</span> {detail.acteur}
+                            </div>
+                          )}
+                          {detail.sentiment && (
+                            <div>
+                              <span className="font-semibold">Sentiment :</span> {detail.sentiment}
+                            </div>
+                          )}
+                          {detail.specialites && (
+                            <div>
+                              <span className="font-semibold">Spécialités perçues :</span> {detail.specialites}
+                            </div>
+                          )}
+                          {detail.pointsForts && detail.pointsForts.length > 0 && (
+                            <div>
+                              <div className="font-semibold">Points forts mis en avant :</div>
+                              <ul className="mt-1 list-disc space-y-1 pl-5">
+                                {detail.pointsForts.map((item, index) => (
+                                  <li key={index}>{item}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {detail.faiblesses && detail.faiblesses.length > 0 && (
+                            <div>
+                              <div className="font-semibold">Faiblesses mentionnées :</div>
+                              <ul className="mt-1 list-disc space-y-1 pl-5">
+                                {detail.faiblesses.map((item, index) => (
+                                  <li key={index}>{item}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {detail.commentaires && (
+                            <div className="text-xs opacity-70">{detail.commentaires}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-dashed p-3 text-sm opacity-70 dark:border-zinc-800">
+                      Aucun détail concurrentiel supplémentaire fourni.
+                    </div>
+                  )}
+                </>
+              ) : (
+                  <div className="rounded-xl border border-dashed p-3 text-sm opacity-70 dark:border-zinc-800">
+                    Aucun concurrent n&apos;a été renseigné pour générer cette partie.
+                  </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "part3" && (
+            <div className="space-y-5">
+              {analysis.report.part3.introduction && (
+                <div className="text-sm opacity-80 whitespace-pre-wrap">
+                  {analysis.report.part3.introduction}
+                </div>
+              )}
+
+              <section className="space-y-3">
+                <div className="text-sm font-semibold uppercase tracking-wide">3.1 Génération de questions</div>
+                {analysis.report.part3.generation.introduction && (
+                  <div className="text-sm opacity-80 whitespace-pre-wrap">
+                    {analysis.report.part3.generation.introduction}
+                  </div>
                 )}
-                {analysis.parsed.questionIntro && (
-                  <div className="whitespace-pre-wrap">{analysis.parsed.questionIntro}</div>
-                )}
-                {analysis.parsed.questions.length ? (
+                {questionMatches.items.length ? (
                   <div className="space-y-2">
-                    {analysis.parsed.questions.map((item, index) => (
+                    {questionMatches.items.map((item, index) => (
                       <details
                         key={`${index}-${item.question.slice(0, 30)}`}
                         className="group rounded-xl border p-3 transition dark:border-zinc-800"
@@ -563,36 +509,44 @@ export default function ProjectAnalysisSection({
                           {item.question}
                         </summary>
                         <div className="mt-3 space-y-2 text-sm">
+                          {item.contexte && (
+                            <div className="text-xs italic opacity-70">Contexte : {item.contexte}</div>
+                          )}
                           {item.analysis ? (
                             <>
-                              {item.analysis.mention && (
-                                <div>
-                                  <span className="font-semibold">Mention probable :</span> {item.analysis.mention}
-                                </div>
-                              )}
-                              {item.analysis.justification && (
-                                <div>
-                                  <span className="font-semibold">Justification :</span> {item.analysis.justification}
-                                </div>
-                              )}
-                              {item.analysis.competitors && (
-                                <div>
-                                  <span className="font-semibold">Concurrents cités :</span> {item.analysis.competitors}
-                                </div>
-                              )}
-                              {item.analysis.extras?.map((extra, idx) => (
-                                <div key={idx} className="opacity-80">
-                                  {extra}
-                                </div>
-                              ))}
-                              {!item.analysis.mention &&
-                                !item.analysis.justification &&
-                                !item.analysis.competitors && (
-                                  <div className="opacity-80 whitespace-pre-wrap">{item.analysis.raw}</div>
+                              <div>
+                                <span className="font-semibold">Mention probable :</span> {item.analysis.mentionProbable}
+                              </div>
+                              <div>
+                                <span className="font-semibold">Justification :</span> {item.analysis.justification}
+                              </div>
+                              <div>
+                                <span className="font-semibold">Concurrents cités :</span>
+                                {item.analysis.concurrents.length ? (
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    {item.analysis.concurrents.map((competitor, idx) => (
+                                      <span
+                                        key={idx}
+                                        className="rounded-full bg-gray-100 px-2 py-0.5 text-xs dark:bg-zinc-800"
+                                      >
+                                        {competitor}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="ml-1 opacity-70">Aucun</span>
                                 )}
+                              </div>
+                              {item.analysis.commentaires && (
+                                <div className="text-xs opacity-70">
+                                  {item.analysis.commentaires}
+                                </div>
+                              )}
                             </>
                           ) : (
-                            <div className="opacity-70">Analyse de visibilité non disponible pour cette question.</div>
+                            <div className="opacity-70">
+                              Analyse de visibilité non disponible pour cette question.
+                            </div>
                           )}
                         </div>
                       </details>
@@ -603,34 +557,57 @@ export default function ProjectAnalysisSection({
                     Impossible d&apos;extraire les questions depuis la réponse générée.
                   </div>
                 )}
-                {analysis.parsed.analysisIntro && (
-                  <div className="whitespace-pre-wrap text-xs opacity-70">
-                    {analysis.parsed.analysisIntro}
+              </section>
+
+              <section className="space-y-3">
+                <div className="text-sm font-semibold uppercase tracking-wide">3.2 Analyse de visibilité</div>
+                {analysis.report.part3.visibilite.introduction && (
+                  <div className="text-sm opacity-80 whitespace-pre-wrap">
+                    {analysis.report.part3.visibilite.introduction}
                   </div>
                 )}
-                {analysis.parsed.leftoverAnalyses.length > 0 && (
+                {questionMatches.leftovers.length > 0 && (
                   <details className="rounded-xl border p-3 text-xs opacity-80 dark:border-zinc-800">
                     <summary className="cursor-pointer select-none font-semibold">
                       Analyses supplémentaires non associées
                     </summary>
                     <div className="mt-2 space-y-2">
-                      {analysis.parsed.leftoverAnalyses.map((block, idx) => (
-                        <div key={idx} className="whitespace-pre-wrap">
-                          {block}
+                      {questionMatches.leftovers.map((analysisItem, idx) => (
+                        <div key={idx} className="space-y-1 rounded-lg bg-gray-50 p-3 dark:bg-zinc-900">
+                          <div className="text-sm font-semibold">{analysisItem.question}</div>
+                          <div>
+                            <span className="font-semibold">Mention probable :</span> {analysisItem.mentionProbable}
+                          </div>
+                          <div>
+                            <span className="font-semibold">Justification :</span> {analysisItem.justification}
+                          </div>
+                          <div>
+                            <span className="font-semibold">Concurrents cités :</span>{" "}
+                            {analysisItem.concurrents.join(", ") || "Aucun"}
+                          </div>
+                          {analysisItem.commentaires && (
+                            <div className="text-xs opacity-70">{analysisItem.commentaires}</div>
+                          )}
                         </div>
                       ))}
                     </div>
                   </details>
                 )}
-              </div>
-            )}
-          </div>
+              </section>
+            </div>
+          )}
 
           {analysis.context && (
-            <div className="mt-6 rounded-xl bg-gray-50 p-3 text-xs leading-5 dark:bg-zinc-900">
+            <div className="rounded-xl bg-gray-50 p-3 text-xs leading-5 dark:bg-zinc-900">
               <div className="font-semibold">Paramètres utilisés</div>
-              <div><span className="font-semibold">Entreprise :</span> {analysis.context.companyName ?? projectName}</div>
-              {analysis.context.city && <div><span className="font-semibold">Ville :</span> {analysis.context.city}</div>}
+              <div>
+                <span className="font-semibold">Entreprise :</span> {analysis.context.companyName ?? projectName}
+              </div>
+              {analysis.context.city && (
+                <div>
+                  <span className="font-semibold">Ville :</span> {analysis.context.city}
+                </div>
+              )}
               {analysis.context.website && (
                 <div>
                   <span className="font-semibold">Site :</span> {analysis.context.website}
@@ -645,26 +622,33 @@ export default function ProjectAnalysisSection({
             </div>
           )}
 
-          <details className="mt-4 text-xs opacity-70">
-            <summary className="cursor-pointer select-none font-semibold">Afficher la réponse brute</summary>
-            <pre className="mt-2 whitespace-pre-wrap rounded-xl bg-gray-100 p-3 dark:bg-zinc-900">
-              {analysis.parsed.raw}
+          <details className="text-xs opacity-70">
+            <summary className="cursor-pointer select-none font-semibold">Afficher les données brutes</summary>
+            {analysis.rawText && (
+              <>
+                <div className="mt-2 font-semibold">Texte renvoyé par l&apos;API</div>
+                <pre className="mt-1 whitespace-pre-wrap rounded-xl bg-gray-100 p-3 dark:bg-zinc-900">
+                  {analysis.rawText}
+                </pre>
+              </>
+            )}
+            <div className="mt-4 font-semibold">JSON structuré</div>
+            <pre className="mt-1 overflow-x-auto rounded-xl bg-gray-100 p-3 dark:bg-zinc-900">
+              {JSON.stringify(analysis.raw ?? analysis.report, null, 2)}
             </pre>
             {analysis.prompt && (
               <>
-                <div className="mt-4 font-semibold">Prompt utilisé :</div>
-                <pre className="mt-2 whitespace-pre-wrap rounded-xl bg-gray-100 p-3 dark:bg-zinc-900">
+                <div className="mt-4 font-semibold">Prompt utilisé</div>
+                <pre className="mt-1 whitespace-pre-wrap rounded-xl bg-gray-100 p-3 dark:bg-zinc-900">
                   {analysis.prompt}
                 </pre>
               </>
             )}
           </details>
 
-          {analysis.parsed.notice && (
-            <div className="mt-6 border-t pt-3 text-xs opacity-70">
-              {analysis.parsed.notice}
-            </div>
-          )}
+          <div className="border-t pt-3 text-xs opacity-70 whitespace-pre-wrap">
+            {analysis.report.notice}
+          </div>
         </div>
       ) : (
         <div className="rounded-2xl border border-dashed p-6 text-center text-sm opacity-70 dark:border-zinc-800">

@@ -4,6 +4,10 @@ import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 
 import { getOpenAIKey } from "@/lib/llm";
+import {
+  REPUTATION_ANALYSIS_JSON_SCHEMA,
+  sanitizeReputationReport,
+} from "@/lib/reputation-report";
 
 const prisma = new PrismaClient();
 
@@ -181,6 +185,42 @@ function extractResponseText(payload: unknown): string {
   return "";
 }
 
+function extractResponseJson(payload: unknown): unknown | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const root = payload as Record<string, unknown>;
+  const direct = (root as { output_json?: unknown }).output_json;
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  const outputField = root.output;
+  if (Array.isArray(outputField)) {
+    for (const item of outputField) {
+      if (!item || typeof item !== "object") continue;
+      const content = (item as { content?: unknown }).content;
+      const parts = Array.isArray(content) ? content : content !== undefined ? [content] : [];
+      for (const part of parts) {
+        if (part && typeof part === "object") {
+          const maybeJson = (part as { json?: unknown }).json;
+          if (maybeJson !== undefined) {
+            return maybeJson;
+          }
+        }
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function safeParseJson(value: string): unknown | undefined {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 async function callOpenAIResponses({
   prompt,
   apiKey,
@@ -189,7 +229,7 @@ async function callOpenAIResponses({
   prompt: string;
   apiKey: string;
   timeoutMs?: number;
-}): Promise<{ content: string; raw: unknown }> {
+}): Promise<{ text?: string; json?: unknown; raw: unknown }> {
   const body = {
     model: "gpt-4o",
     input: [
@@ -203,10 +243,9 @@ async function callOpenAIResponses({
         ],
       },
     ],
-    text: {
-      format: {
-        type: "text" as const,
-      },
+    response_format: {
+      type: "json_schema" as const,
+      json_schema: REPUTATION_ANALYSIS_JSON_SCHEMA,
     },
     reasoning: {},
     tools: [
@@ -243,8 +282,9 @@ async function callOpenAIResponses({
     }
 
     const json = (await response.json()) as unknown;
-    const content = extractResponseText(json);
-    return { content, raw: json };
+    const text = extractResponseText(json);
+    const structured = extractResponseJson(json);
+    return { text, json: structured, raw: json };
   } finally {
     clearTimeout(timer);
   }
@@ -310,16 +350,29 @@ export async function POST(
   }
 
   try {
-    const { content } = await callOpenAIResponses({ prompt, apiKey });
-    if (!content) {
+    const { text, json: structured } = await callOpenAIResponses({ prompt, apiKey });
+    const rawText = typeof text === "string" && text.trim().length > 0 ? text : undefined;
+    const rawPayload = structured ?? (rawText ? safeParseJson(rawText) : undefined);
+
+    if (!rawPayload) {
       return NextResponse.json(
         { error: "Réponse vide d'OpenAI" },
         { status: 502 }
       );
     }
 
+    const report = sanitizeReputationReport(rawPayload);
+    if (!report) {
+      return NextResponse.json(
+        { error: "Format de réponse inattendu" },
+        { status: 502 }
+      );
+    }
+
     return NextResponse.json({
-      result: content,
+      result: report,
+      raw: rawPayload,
+      rawText: rawText ?? null,
       prompt,
       context: {
         companyName,
