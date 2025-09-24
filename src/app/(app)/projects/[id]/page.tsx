@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import BrandEditDialog from "@/components/projects/BrandEditDialog";
 import DomainCreateDialog from "@/components/projects/DomainCreateDialog";
 import DomainCard from "@/components/projects/DomainCard";
+import AnalysisLauncher from "@/components/projects/AnalysisLauncher";
 
 const prisma = new PrismaClient();
 
@@ -85,6 +86,8 @@ export default async function ProjectPage({ params }: PageProps) {
           </div>
         )}
       </section>
+
+      <AnalysisLauncher projectId={project.id} />
     </div>
   );
 }
