@@ -36,6 +36,10 @@ export const AnalysisReportSchema = z.object({
   }),
   part2: z.object({
     present: z.boolean(),
+    positionnementConcurrentiel: z.object({
+      comparaison: z.string(), // MODIFIÉ : accepte maintenant du texte libre
+    }).optional(),
+    // Garde l'ancien champ pour rétrocompatibilité mais optionnel
     comparaison: z
       .array(
         z.object({

@@ -126,12 +126,16 @@ En te basant sur toute ton analyse précédente (secteur d'activité, services c
 
 IMPORTANT : Tu DOIS générer AU MINIMUM 15 questions. Chaque question doit avoir sa propre analyse de visibilité et sa réponse IA associée.
 
-3.2. Analyse de Visibilité : Ensuite, pour chacune des questions que tu viens de générer, fournis l'analyse concise en 3 points :
-- Mention probable : Réponds par Oui, Non, ou Probable.
-- Justification : Explique en une courte phrase pourquoi.
-- Concurrents cités : Liste les concurrents ou autres acteurs qui seraient probablement mentionnés.
+3.2. NOUVELLE MÉTHODOLOGIE EN 2 ÉTAPES :
 
-3.3. Réponses aux questions : Ensuite, pour chacune des questions que tu viens de générer, fournis la réponse associée → "reponseIA" pour chaque question
+ÉTAPE A - Génération de la réponse : Pour chaque question, génère d'ABORD la réponse complète et factuelle qu'une IA donnerait réellement à cette question, en te basant sur tes recherches.
+
+ÉTAPE B - Analyse de la réponse générée : Ensuite, analyse ta propre réponse pour déterminer :
+- Mention probable : Réponds par Oui, Non, ou Probable selon ce que tu viens de générer dans ta réponse
+- Justification : Explique pourquoi [Nom de l'entreprise] apparaît ou n'apparaît pas dans ta réponse
+- Concurrents cités : Liste UNIQUEMENT les concurrents qui apparaissent réellement dans ta réponse générée (pas ceux qui pourraient théoriquement être cités)
+
+RÈGLE CRITIQUE : L'analyse de visibilité doit être parfaitement cohérente avec la réponse générée. Si ta réponse ne mentionne aucun concurrent, alors "concurrentsCites" doit être vide.
 
 Pied de Page du Rapport : Termine ton rapport avec la notice méthodologique : "Ce rapport est une synthèse générée par une IA en se basant sur les données publiques accessibles. Il constitue une analyse de réputation et non une vérité absolue." → "noteMethodo"
 
@@ -173,9 +177,11 @@ function buildPromptExactWithData({
     `"brand": "${brand || "—"}"`
   );
   
+  // CORRECTION : Forcer part2.present selon le nombre de concurrents
+  const hasCompetitors = competitors.length > 0;
   p = p.replace(
     '"present": true',
-    `"present": ${competitors.length > 0 ? 'true' : 'false'}`
+    `"present": ${hasCompetitors ? 'true' : 'false'}`
   );
 
   // 4) Concurrents :
@@ -206,6 +212,16 @@ function buildPromptExactWithData({
         `$1\n${competitorsBlock}\n`
       );
     }
+  }
+
+  // 5) AJOUT : Instruction explicite sur les concurrents
+  if (competitors.length > 0) {
+    p += `\n\n🚨 INSTRUCTION CRITIQUE POUR PARTIE 2 🚨
+ATTENTION : Tu as ${competitors.length} concurrent(s) fourni(s) : ${competitors.join(', ')}
+- part2.present DOIT être absolument true
+- Tu DOIS faire une vraie comparaison détaillée entre ${brand} et ces concurrents
+- Ne mets jamais "Aucun concurrent fourni" ou "impossible d'établir une comparaison"
+- Base-toi sur les informations publiques trouvées pour chaque concurrent`;
   }
 
   return p;
@@ -361,12 +377,23 @@ export async function POST(
   // Agréger + dédupliquer les concurrents (string[])
   const competitorsSet = new Set<string>();
   for (const d of project.domains ?? []) {
-    for (const c of d.competitors ?? []) {
+    // CORRECTION : Les concurrents sont stockés comme string JSON dans la BDD
+    let domainCompetitors: string[] = [];
+    try {
+      const parsed = JSON.parse(d.competitors || '[]');
+      domainCompetitors = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      domainCompetitors = [];
+    }
+    
+    for (const c of domainCompetitors) {
       const name = String(c || "").trim();
       if (name) competitorsSet.add(name);
     }
   }
   const competitors = Array.from(competitorsSet);
+  
+  console.log("🔍 DEBUG: Concurrents extraits:", competitors);
 
   const apiKey = await getOpenAIKey();
   if (!apiKey) {
@@ -494,6 +521,11 @@ export async function POST(
         console.log("❌ reponseIA manquant - le modèle n'a pas généré ce champ");
       }
     }
+    
+    // DEBUG: Vérifier la structure part2
+    console.log("🔍 DEBUG part2:", JSON.stringify(parsed.part2, null, 2));
+    console.log("🔍 part2.present:", parsed.part2?.present);
+    console.log("🔍 part2.positionnementConcurrentiel:", parsed.part2?.positionnementConcurrentiel);
     
     const safe = AnalysisReportSchema.parse(parsed);
     // Le generatedAt est maintenant fourni par le modèle, pas besoin de l'écraser

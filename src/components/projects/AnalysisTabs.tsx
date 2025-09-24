@@ -91,6 +91,11 @@ export default function AnalysisTabs({ data }: { data: AnalysisReport }) {
   console.log("🔍 DEBUG Front: Première question:", data.part3.questions[0]);
   console.log("🎯 reponseIA dans le front:", !!data.part3.questions[0]?.reponseIA);
   
+  // DEBUG: Vérifier part2 dans le front
+  console.log("🔍 DEBUG Front part2:", data.part2);
+  console.log("🔍 Front part2.present:", data.part2.present);
+  console.log("🔍 Front part2.positionnementConcurrentiel:", data.part2.positionnementConcurrentiel);
+  
   const sentimentTone =
     data.part1.sentimentGlobal.label === "Positive" ? "positive" :
     data.part1.sentimentGlobal.label === "Négative" ? "negative" :
@@ -185,45 +190,55 @@ export default function AnalysisTabs({ data }: { data: AnalysisReport }) {
           </div>
         ) : (
           <div className="rounded-xl border p-4">
-            <h4 className="font-semibold mb-3">Comparaison synthétique</h4>
-            <div className="overflow-x-auto">
-              <table className="min-w-[700px] w-full text-sm">
-                <thead className="text-left">
-                  <tr className="border-b">
-                    <th className="py-2 pr-4">Acteur</th>
-                    <th className="py-2 pr-4">Sentiment</th>
-                    <th className="py-2 pr-4">Spécialités perçues</th>
-                    <th className="py-2 pr-4">Points forts</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.part2.comparaison.map((row, i) => (
-                    <tr key={i} className="border-b last:border-0 align-top">
-                      <td className="py-2 pr-4 font-medium">{row.acteur}</td>
-                      <td className="py-2 pr-4">
-                        {row.sentiment ? <Pill tone={
-                          row.sentiment === "Positive" ? "positive" :
-                          row.sentiment === "Négative" ? "negative" :
-                          row.sentiment === "Mixte" ? "mixed" : "neutral"
-                        }>{row.sentiment}</Pill> : "—"}
-                      </td>
-                      <td className="py-2 pr-4">
-                        <div className="flex flex-wrap gap-1">
-                          {row.specialites?.map((s, k) => (
-                            <span key={k} className="rounded bg-muted px-2 py-0.5">{s}</span>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="py-2 pr-4">
-                        <ul className="list-disc pl-5 space-y-0.5">
-                          {row.pointsForts?.map((p, k) => <li key={k}>{p}</li>)}
-                        </ul>
-                      </td>
+            <h4 className="font-semibold mb-3">Comparaison concurrentielle</h4>
+            {/* Affichage du texte libre de comparaison */}
+            {typeof data.part2.positionnementConcurrentiel?.comparaison === 'string' ? (
+              <div className="prose prose-sm max-w-none">
+                <p className="text-sm leading-relaxed whitespace-pre-line">
+                  {data.part2.positionnementConcurrentiel.comparaison}
+                </p>
+              </div>
+            ) : (
+              /* Fallback pour l'ancien format tableau (si il existe encore) */
+              <div className="overflow-x-auto">
+                <table className="min-w-[700px] w-full text-sm">
+                  <thead className="text-left">
+                    <tr className="border-b">
+                      <th className="py-2 pr-4">Acteur</th>
+                      <th className="py-2 pr-4">Sentiment</th>
+                      <th className="py-2 pr-4">Spécialités perçues</th>
+                      <th className="py-2 pr-4">Points forts</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {(data.part2.comparaison || []).map((row, i) => (
+                      <tr key={i} className="border-b last:border-0 align-top">
+                        <td className="py-2 pr-4 font-medium">{row.acteur}</td>
+                        <td className="py-2 pr-4">
+                          {row.sentiment ? <Pill tone={
+                            row.sentiment === "Positive" ? "positive" :
+                            row.sentiment === "Négative" ? "negative" :
+                            row.sentiment === "Mixte" ? "mixed" : "neutral"
+                          }>{row.sentiment}</Pill> : "—"}
+                        </td>
+                        <td className="py-2 pr-4">
+                          <div className="flex flex-wrap gap-1">
+                            {row.specialites?.map((s, k) => (
+                              <span key={k} className="rounded bg-muted px-2 py-0.5">{s}</span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="py-2 pr-4">
+                          <ul className="list-disc pl-5 space-y-0.5">
+                            {row.pointsForts?.map((p, k) => <li key={k}>{p}</li>)}
+                          </ul>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </TabsContent>
