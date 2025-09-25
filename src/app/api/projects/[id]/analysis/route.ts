@@ -1,7 +1,7 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, Prisma } from "@prisma/client";
 import { AnalysisReportSchema, stripCodeFences } from "@/types/analysis";
 import { getOpenAIKey } from "@/lib/llm";
 
@@ -356,6 +356,33 @@ function deepFindText(obj: any): string | null {
 }
 
 /* --------------------- Handler --------------------- */
+export async function GET(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+
+  const existing = await prisma.projectAnalysis.findFirst({
+    where: { projectId: id },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (!existing) {
+    return NextResponse.json({ parsed: null });
+  }
+
+  try {
+    const parsed = AnalysisReportSchema.parse(existing.report);
+    return NextResponse.json({ parsed, createdAt: existing.createdAt });
+  } catch (error: unknown) {
+    console.error("⚠️ Analyse enregistrée invalide", error);
+    return NextResponse.json(
+      { error: "INVALID_SAVED_ANALYSIS" },
+      { status: 500 }
+    );
+  }
+}
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -529,9 +556,16 @@ export async function POST(
     
     const safe = AnalysisReportSchema.parse(parsed);
     // Le generatedAt est maintenant fourni par le modèle, pas besoin de l'écraser
-    
+
+    await prisma.projectAnalysis.create({
+      data: {
+        projectId: id,
+        report: safe as unknown as Prisma.InputJsonValue,
+      },
+    });
+
     return NextResponse.json({ parsed: safe });
-    
+
   } catch (e: any) {
     console.error("💥 Erreur générale:", e);
     return NextResponse.json(
