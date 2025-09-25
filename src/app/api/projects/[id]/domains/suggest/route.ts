@@ -80,6 +80,117 @@ function sanitizeCompetitors(
   return out.slice(0, 20);
 }
 
+function keywordTokens(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2);
+}
+
+function computeConfidenceDetails({
+  competitor,
+  domainName,
+  city,
+  country,
+  webSearchUsed,
+}: {
+  competitor: { name: string; website?: string };
+  domainName: string;
+  city?: string | null;
+  country?: string | null;
+  webSearchUsed: boolean;
+}) {
+  let score = 45;
+  const reasons: string[] = [];
+
+  const domainKeywords = keywordTokens(domainName);
+  const competitorKeywords = keywordTokens(competitor.name);
+  const keywordOverlap = domainKeywords.filter((kw) => competitorKeywords.includes(kw));
+  if (keywordOverlap.length) {
+    score += Math.min(15, keywordOverlap.length * 4);
+    reasons.push(`Alignement sectoriel (${keywordOverlap.slice(0, 3).join(", ")})`);
+  }
+
+  let cityMatch = false;
+  if (city) {
+    const normalizedCity = city.toLowerCase();
+    if (competitor.name.toLowerCase().includes(normalizedCity)) {
+      cityMatch = true;
+    }
+    if (competitor.website) {
+      try {
+        const url = new URL(competitor.website);
+        if (url.hostname.toLowerCase().includes(normalizedCity)) cityMatch = true;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (cityMatch) {
+      score += 6;
+      reasons.push(`Présence locale détectée (${city})`);
+    }
+  }
+
+  let localTld = false;
+  if (competitor.website) {
+    score += 12;
+    reasons.push("Site officiel identifié");
+    if (country) {
+      try {
+        const url = new URL(competitor.website);
+        if (url.hostname.toLowerCase().endsWith(`.${country.toLowerCase()}`)) {
+          localTld = true;
+          score += 4;
+          reasons.push(`Nom de domaine local (${country.toUpperCase()})`);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  if (webSearchUsed) {
+    score += 8;
+    reasons.push("Validation via recherche web");
+  }
+
+  score = Math.max(35, Math.min(95, score));
+  return { score, reasons, keywordOverlap, cityMatch, localTld };
+}
+
+function computeSignals({
+  competitor,
+  keywordOverlap,
+  cityMatch,
+  localTld,
+  webSearchUsed,
+}: {
+  competitor: { website?: string };
+  keywordOverlap: string[];
+  cityMatch: boolean;
+  localTld: boolean;
+  webSearchUsed: boolean;
+}) {
+  const signals = new Set<string>();
+  if (webSearchUsed) signals.add("Web");
+  if (competitor.website) signals.add("SEO");
+  if (keywordOverlap.length) signals.add("Match secteur");
+  if (cityMatch) signals.add("Local");
+  if (localTld) signals.add("Marché cible");
+
+  if (competitor.website) {
+    const lower = competitor.website.toLowerCase();
+    if (/(facebook|instagram|linkedin|tiktok|twitter)/.test(lower)) signals.add("Social");
+    if (/(press|news|journal|magazine)/.test(lower)) signals.add("Presse");
+    if (/blog|insight|report/.test(lower)) signals.add("Contenu");
+  }
+
+  if (signals.size === 0) signals.add("IA");
+  return Array.from(signals);
+}
+
 /* -------------------- OpenAI helpers -------------------- */
 
 /** Chat completions (gpt-4o-mini) — rapide */
@@ -571,28 +682,66 @@ Format JSON uniquement: {"competitors": [{"name": "...", "website": "..."}]}
       };
 
       const finalItems = parseCompetitors(result);
+      const enrichedItems = finalItems.map((item) => {
+        const details = computeConfidenceDetails({
+          competitor: item,
+          domainName,
+          city: city || null,
+          country: country || null,
+          webSearchUsed,
+        });
+        const signals = computeSignals({
+          competitor: item,
+          keywordOverlap: details.keywordOverlap,
+          cityMatch: details.cityMatch,
+          localTld: details.localTld,
+          webSearchUsed,
+        });
+        const reason = details.reasons.join(" • ");
+        return {
+          ...item,
+          confidence: details.score,
+          signals,
+          source,
+          reason: reason || undefined,
+        } satisfies {
+          name: string;
+          website?: string;
+          confidence: number;
+          signals: string[];
+          source: string;
+          reason?: string;
+        };
+      });
+      const averageConfidence = enrichedItems.length
+        ? Math.round(
+            enrichedItems.reduce((sum, item) => sum + (item.confidence ?? 0), 0) /
+              enrichedItems.length
+          )
+        : null;
       const executionTime = source.includes('o3') ? "~45-90s" : "~10-20s";
-      
+
       console.log(`⚡ RÉSULTAT: ${finalItems.length} concurrents en ${executionTime}`);
       console.log(`🔍 Source: ${source}, Web search: ${webSearchUsed ? "✅" : "❌"}`);
 
       if (finalItems.length > 0) {
-        return NextResponse.json({ 
-          items: finalItems, 
-          source, 
+        return NextResponse.json({
+          items: enrichedItems,
+          source,
           webSearchUsed,
           method: "gpt4o-fast-websearch",
           totalFound: finalItems.length,
           executionTime,
-          performance: source.includes('gpt4o') ? "fast" : "slow"
+          performance: source.includes('gpt4o') ? "fast" : "slow",
+          averageConfidence,
         });
       } else {
-        return NextResponse.json({ 
-          items: [], 
+        return NextResponse.json({
+          items: [],
           source,
           webSearchUsed,
           error: "Aucun concurrent parsé",
-          debug: { 
+          debug: {
             resultLength: result.length,
             resultPreview: result.substring(0, 300)
           } 
