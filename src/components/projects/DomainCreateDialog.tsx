@@ -8,6 +8,18 @@ import { useRouter } from "next/navigation";
 /** Normalise une réponse variée (```json …```, CSV, listes, etc.) en tableau de chaînes */
 function normalizeList(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.map((x) => String(x)).filter(Boolean);
+  const toStrings = (value: unknown): string[] => {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed ? [trimmed] : [];
+    }
+    if (Array.isArray(value)) return value.flatMap(toStrings);
+    if (value && typeof value === "object") {
+      return Object.values(value).flatMap(toStrings);
+    }
+    return [];
+  };
+
   if (typeof raw !== "string") return [];
   let text = raw.trim();
 
@@ -16,8 +28,9 @@ function normalizeList(raw: unknown): string[] {
 
   // tente JSON direct
   try {
-    const j = JSON.parse(text);
-    if (Array.isArray(j)) return j.map((x) => String(x)).filter(Boolean);
+    const parsed = JSON.parse(text);
+    const list = toStrings(parsed);
+    if (list.length) return list;
   } catch {
     /* ignore */
   }
