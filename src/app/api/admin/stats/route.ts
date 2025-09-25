@@ -128,7 +128,7 @@ export async function GET(req: Request) {
       stale: llmStale,
     },
     users: {
-      newLast30Days,
+      newLast30Days: newUsersLast30,
       latest: latestUsers.map((user) => ({
         id: user.id,
         email: user.email,
