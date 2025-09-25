@@ -7,6 +7,12 @@ import { authOptions } from "@/lib/authOptions";
 
 const prisma = new PrismaClient();
 
+type CompetitorSuggestionInput = {
+  name?: string;
+  website?: string;
+  reason?: string;
+};
+
 /**
  * Lire un domaine (facultatif, utile si tu veux fetch côté client)
  */
@@ -17,7 +23,16 @@ export async function GET(
   const { id, domainId } = await params;
   const domain = await prisma.domain.findUnique({
     where: { id: domainId },
-    select: { id: true, name: true, notes: true, competitors: true, updatedAt: true, projectId: true },
+    select: {
+      id: true,
+      name: true,
+      notes: true,
+      competitors: true,
+      suggestions: true,
+      createdAt: true,
+      updatedAt: true,
+      projectId: true,
+    },
   });
   if (!domain || domain.projectId !== id) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -48,21 +63,49 @@ export async function PATCH(
   if (!isAdmin && !isOwner) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const body = await req.json().catch(() => ({}));
-  const { name, notes, competitors } = body as {
+  const { name, notes, competitors, suggestions } = body as {
     name?: string;
     notes?: string | null;
     competitors?: string[] | null;
+    suggestions?: CompetitorSuggestionInput[] | string[] | null;
   };
 
   const data: any = {};
   if (typeof name === "string") data.name = name.trim();
   if (typeof notes === "string" || notes === null) data.notes = notes?.trim() || null;
   if (Array.isArray(competitors)) data.competitors = JSON.stringify(competitors.filter(Boolean));
+  if (Array.isArray(suggestions)) {
+    const normalized = suggestions
+      .map((item) => {
+        if (typeof item === "string") {
+          const name = item.trim();
+          return name ? { name } : null;
+        }
+        const name = String(item?.name ?? "").trim();
+        if (!name) return null;
+        return {
+          name,
+          website: item?.website ? String(item.website) : undefined,
+          reason: item?.reason ? String(item.reason) : undefined,
+        };
+      })
+      .filter((entry): entry is { name: string; website?: string; reason?: string } => Boolean(entry));
+
+    data.suggestions = JSON.stringify(normalized);
+  }
 
   const updated = await prisma.domain.update({
     where: { id: domainId },
     data,
-    select: { id: true, name: true, notes: true, competitors: true, updatedAt: true },
+    select: {
+      id: true,
+      name: true,
+      notes: true,
+      competitors: true,
+      suggestions: true,
+      createdAt: true,
+      updatedAt: true,
+    },
   });
 
   return NextResponse.json(updated);

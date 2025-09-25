@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { AnalysisReportSchema, stripCodeFences } from "@/types/analysis";
+import { summarizeAnalysis } from "@/lib/analysisSummary";
 import { getOpenAIKey } from "@/lib/llm";
 
 const prisma = new PrismaClient();
@@ -361,19 +362,84 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const url = new URL(req.url);
+  const runId = url.searchParams.get("runId");
 
-  const existing = await prisma.projectAnalysis.findFirst({
-    where: { projectId: id },
-    orderBy: { createdAt: "desc" },
-  });
+  const [latest, historyRows] = await Promise.all([
+    prisma.projectAnalysis.findFirst({
+      where: { projectId: id },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.projectAnalysis.findMany({
+      where: { projectId: id },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+    }),
+  ]);
 
-  if (!existing) {
-    return NextResponse.json({ parsed: null });
+  if (!latest) {
+    return NextResponse.json({ parsed: null, history: [] });
+  }
+
+  let target = latest;
+
+  if (runId && runId !== latest.id) {
+    const requested = await prisma.projectAnalysis.findFirst({
+      where: { id: runId, projectId: id },
+    });
+
+    if (!requested) {
+      return NextResponse.json(
+        { error: "ANALYSIS_NOT_FOUND" },
+        { status: 404 }
+      );
+    }
+
+    target = requested;
   }
 
   try {
-    const parsed = AnalysisReportSchema.parse(existing.report);
-    return NextResponse.json({ parsed, createdAt: existing.createdAt });
+    const parsed = AnalysisReportSchema.parse(target.report);
+    const currentSummary = summarizeAnalysis(parsed);
+
+    const historyMap = new Map<string, {
+      id: string;
+      createdAt: string;
+      summary: ReturnType<typeof summarizeAnalysis>;
+    }>();
+
+    for (const row of historyRows) {
+      const parsedRow = AnalysisReportSchema.safeParse(row.report);
+      if (!parsedRow.success) continue;
+      historyMap.set(row.id, {
+        id: row.id,
+        createdAt: row.createdAt.toISOString(),
+        summary: summarizeAnalysis(parsedRow.data),
+      });
+    }
+
+    if (!historyMap.has(target.id)) {
+      historyMap.set(target.id, {
+        id: target.id,
+        createdAt: target.createdAt.toISOString(),
+        summary: currentSummary,
+      });
+    }
+
+    const history = Array.from(historyMap.values())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 5);
+
+    return NextResponse.json({
+      parsed,
+      createdAt: target.createdAt.toISOString(),
+      history,
+      run: {
+        id: target.id,
+        createdAt: target.createdAt.toISOString(),
+        summary: currentSummary,
+      },
+    });
   } catch (error: unknown) {
     console.error("⚠️ Analyse enregistrée invalide", error);
     return NextResponse.json(
@@ -557,14 +623,24 @@ export async function POST(
     const safe = AnalysisReportSchema.parse(parsed);
     // Le generatedAt est maintenant fourni par le modèle, pas besoin de l'écraser
 
-    await prisma.projectAnalysis.create({
+    const created = await prisma.projectAnalysis.create({
       data: {
         projectId: id,
         report: safe as unknown as Prisma.InputJsonValue,
       },
+      select: { id: true, createdAt: true },
     });
 
-    return NextResponse.json({ parsed: safe });
+    const summary = summarizeAnalysis(safe);
+
+    return NextResponse.json({
+      parsed: safe,
+      run: {
+        id: created.id,
+        createdAt: created.createdAt.toISOString(),
+        summary,
+      },
+    });
 
   } catch (e: any) {
     console.error("💥 Erreur générale:", e);

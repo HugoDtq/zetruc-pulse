@@ -29,7 +29,15 @@ export default async function ProjectPage({ params }: PageProps) {
     prisma.domain.findMany({
       where: { projectId: id },
       orderBy: { createdAt: "desc" },
-      select: { id: true, name: true, notes: true, competitors: true, updatedAt: true },
+      select: {
+        id: true,
+        name: true,
+        notes: true,
+        competitors: true,
+        suggestions: true,
+        createdAt: true,
+        updatedAt: true,
+      },
     }),
   ]);
 
