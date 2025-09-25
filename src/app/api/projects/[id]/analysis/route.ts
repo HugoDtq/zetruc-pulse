@@ -3,6 +3,7 @@ export const runtime = "nodejs";
 import { NextResponse } from "next/server";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { AnalysisReportSchema, stripCodeFences } from "@/types/analysis";
+import { summarizeAnalysis } from "@/lib/analysisSummary";
 import { getOpenAIKey } from "@/lib/llm";
 
 const prisma = new PrismaClient();
@@ -362,18 +363,45 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  const existing = await prisma.projectAnalysis.findFirst({
-    where: { projectId: id },
-    orderBy: { createdAt: "desc" },
-  });
+  const [latest, historyRows] = await Promise.all([
+    prisma.projectAnalysis.findFirst({
+      where: { projectId: id },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.projectAnalysis.findMany({
+      where: { projectId: id },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+    }),
+  ]);
 
-  if (!existing) {
-    return NextResponse.json({ parsed: null });
+  if (!latest) {
+    return NextResponse.json({ parsed: null, history: [] });
   }
 
   try {
-    const parsed = AnalysisReportSchema.parse(existing.report);
-    return NextResponse.json({ parsed, createdAt: existing.createdAt });
+    const parsed = AnalysisReportSchema.parse(latest.report);
+    const history = historyRows
+      .map((row) => {
+        const parsedRow = AnalysisReportSchema.safeParse(row.report);
+        if (!parsedRow.success) return null;
+        return {
+          id: row.id,
+          createdAt: row.createdAt.toISOString(),
+          summary: summarizeAnalysis(parsedRow.data),
+        };
+      })
+      .filter((entry): entry is {
+        id: string;
+        createdAt: string;
+        summary: ReturnType<typeof summarizeAnalysis>;
+      } => Boolean(entry));
+
+    return NextResponse.json({
+      parsed,
+      createdAt: latest.createdAt.toISOString(),
+      history,
+    });
   } catch (error: unknown) {
     console.error("⚠️ Analyse enregistrée invalide", error);
     return NextResponse.json(
@@ -557,14 +585,24 @@ export async function POST(
     const safe = AnalysisReportSchema.parse(parsed);
     // Le generatedAt est maintenant fourni par le modèle, pas besoin de l'écraser
 
-    await prisma.projectAnalysis.create({
+    const created = await prisma.projectAnalysis.create({
       data: {
         projectId: id,
         report: safe as unknown as Prisma.InputJsonValue,
       },
+      select: { id: true, createdAt: true },
     });
 
-    return NextResponse.json({ parsed: safe });
+    const summary = summarizeAnalysis(safe);
+
+    return NextResponse.json({
+      parsed: safe,
+      run: {
+        id: created.id,
+        createdAt: created.createdAt.toISOString(),
+        summary,
+      },
+    });
 
   } catch (e: any) {
     console.error("💥 Erreur générale:", e);

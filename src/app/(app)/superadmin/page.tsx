@@ -23,6 +23,39 @@ type ApiList = {
 
 type LlmRow = { provider: string; last4: string | null; updatedAt: string };
 
+type AdminStats = {
+  totals: { users: number; projects: number; domains: number; analyses: number };
+  analyses: {
+    last30Days: number;
+    latest: Array<{
+      id: string;
+      projectName: string;
+      createdAt: string;
+      summary: {
+        generatedAt: string;
+        sentiment: string;
+        questionCount: number;
+        mentionYes: number;
+        mentionRate: number;
+        competitorCount: number;
+        competitorNames: string[];
+      };
+    }>;
+  };
+  domains: {
+    withoutCompetitors: number;
+    alerts: Array<{ id: string; name: string; projectName: string; competitorCount: number }>;
+  };
+  llm: {
+    configured: number;
+    stale: Array<{ provider: string; updatedAt: string }>;
+  };
+  users: {
+    newLast30Days: number;
+    latest: Array<{ id: string; email: string; group: Group; createdAt: string }>;
+  };
+};
+
 const PROVIDERS: Array<{ id: string; label: string; placeholder: string }> = [
   { id: "OPENAI",     label: "OpenAI",               placeholder: "sk-..." },
   { id: "ANTHROPIC",  label: "Claude (Anthropic)",   placeholder: "sk-ant-..." },
@@ -51,6 +84,9 @@ export default function SuperadminPage() {
 
   const [data, setData] = useState<ApiList | null>(null);
   const [loading, setLoading] = useState(false);
+  const [stats, setStats] = useState<AdminStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState<string | null>(null);
 
   const qs = useMemo(() => {
     const p = new URLSearchParams();
@@ -62,6 +98,22 @@ export default function SuperadminPage() {
     p.set("pageSize", String(pageSize));
     return p.toString();
   }, [q, group, sort, order, page, pageSize]);
+
+  async function fetchStats() {
+    setStatsLoading(true);
+    setStatsError(null);
+    try {
+      const res = await fetch("/api/admin/stats");
+      if (!res.ok) throw new Error();
+      const json = (await res.json()) as AdminStats;
+      setStats(json);
+    } catch {
+      setStatsError("Impossible de charger les statistiques globales.");
+    } finally {
+      setStatsLoading(false);
+    }
+  }
+  useEffect(() => { fetchStats(); }, []);
 
   async function fetchList() {
     setLoading(true);
@@ -93,6 +145,94 @@ export default function SuperadminPage() {
   return (
     <div className="p-6 space-y-10">
       <h1 className="text-2xl font-bold">Superadmin</h1>
+
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">Vue d'ensemble</h2>
+          <button
+            onClick={fetchStats}
+            disabled={statsLoading}
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-gray-50 disabled:opacity-60 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          >
+            {statsLoading ? "Rafraîchissement…" : "Actualiser"}
+          </button>
+        </div>
+
+        {statsError && <p className="text-sm text-rose-600">{statsError}</p>}
+
+        {stats ? (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <StatTile label="Utilisateurs" value={stats.totals.users} helper={`+${stats.users.newLast30Days} sur 30 jours`} />
+            <StatTile label="Projets" value={stats.totals.projects} helper={`${stats.domains.withoutCompetitors} projets sans veille active`} />
+            <StatTile label="Domaines" value={stats.totals.domains} helper={`${stats.domains.alerts.length} domaines à compléter`} />
+            <StatTile label="Analyses" value={stats.totals.analyses} helper={`${stats.analyses.last30Days} générées sur 30 jours`} />
+          </div>
+        ) : (
+          <div className="rounded-lg border p-4 text-sm text-muted-foreground dark:border-zinc-700">
+            Chargement des statistiques globales…
+          </div>
+        )}
+      </section>
+
+      {stats && (
+        <section className="grid gap-6 lg:grid-cols-2">
+          <div className="space-y-4 rounded-lg border p-4 dark:border-zinc-700">
+            <h3 className="text-md font-semibold">Alertes veille concurrentielle</h3>
+            {stats.domains.alerts.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Tous les domaines disposent d'au moins 3 concurrents suivis.</p>
+            ) : (
+              <ul className="space-y-3 text-sm">
+                {stats.domains.alerts.map((item) => (
+                  <li key={item.id} className="rounded-lg border border-dashed p-3 dark:border-zinc-600">
+                    <p className="font-medium">{item.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {item.projectName} • {item.competitorCount} concurrents suivis
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="space-y-4 rounded-lg border p-4 dark:border-zinc-700">
+            <h3 className="text-md font-semibold">Activité analyses IA</h3>
+            {stats.analyses.latest.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Aucune analyse générée récemment.</p>
+            ) : (
+              <ul className="space-y-3 text-sm">
+                {stats.analyses.latest.map((item) => (
+                  <li key={item.id} className="rounded-lg border border-dashed p-3 dark:border-zinc-600">
+                    <p className="font-medium">{item.projectName}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(item.summary.generatedAt).toLocaleString()} • {item.summary.mentionRate}% de visibilité • {item.summary.competitorCount} concurrents
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </section>
+      )}
+
+      {stats && (
+        <section className="rounded-lg border p-4 dark:border-zinc-700">
+          <h3 className="text-md font-semibold">Nouveaux comptes</h3>
+          {stats.users.latest.length === 0 ? (
+            <p className="text-sm text-muted-foreground mt-2">Aucun compte créé récemment.</p>
+          ) : (
+            <ul className="mt-3 space-y-2 text-sm">
+              {stats.users.latest.map((user) => (
+                <li key={user.id} className="flex items-center justify-between rounded-lg border border-dashed p-2 dark:border-zinc-600">
+                  <div>
+                    <p className="font-medium">{user.email}</p>
+                    <p className="text-xs text-muted-foreground">{user.group} • {new Date(user.createdAt).toLocaleString()}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       {/* =====================================================
           Bloc : Gestion des utilisateurs
@@ -212,13 +352,18 @@ export default function SuperadminPage() {
       ===================================================== */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Clés API LLM</h2>
+          <h2 className="text-lg font-semibold">
+            Clés API LLM
+            {typeof stats?.llm.configured === "number" && (
+              <span className="ml-2 text-sm text-muted-foreground">{stats.llm.configured} configurées</span>
+            )}
+          </h2>
         </div>
         <p className="text-sm opacity-75">
           Les clés sont <strong>chiffrées</strong> en base. On n’affiche jamais la valeur complète ; seulement les 4 derniers caractères.
         </p>
 
-        <LlmKeysSection />
+        <LlmKeysSection staleProviders={stats?.llm.stale ?? []} />
       </section>
     </div>
   );
@@ -227,6 +372,24 @@ export default function SuperadminPage() {
 /* =========================================================
    Sous-composants
 ========================================================= */
+
+function StatTile({
+  label,
+  value,
+  helper,
+}: {
+  label: string;
+  value: number;
+  helper?: string;
+}) {
+  return (
+    <div className="rounded-xl border p-4 dark:border-zinc-700 dark:bg-zinc-900/40">
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-2 text-2xl font-semibold">{value}</p>
+      {helper && <p className="mt-1 text-xs text-muted-foreground">{helper}</p>}
+    </div>
+  );
+}
 
 function Th({
   label,
@@ -321,7 +484,7 @@ function CreateUserCard({ onCreated }: { onCreated: () => void }) {
 }
 
 /* ---------- LlmKeysSection ---------- */
-function LlmKeysSection() {
+function LlmKeysSection({ staleProviders }: { staleProviders: Array<{ provider: string; updatedAt: string }> }) {
   const { toast } = useToast();
   const [rows, setRows] = useState<LlmRow[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
@@ -338,8 +501,10 @@ function LlmKeysSection() {
 
   function status(provider: string) {
     const row = rows.find((r) => r.provider === provider);
+    const stale = staleProviders.find((item) => item.provider === provider);
     if (!row) return "Non configurée";
-    return `Configurée (…${row.last4}) • ${new Date(row.updatedAt).toLocaleString()}`;
+    const base = `Configurée (…${row.last4}) • ${new Date(row.updatedAt).toLocaleString()}`;
+    return stale ? `${base} • ⚠️ à renouveler` : base;
   }
 
   async function save(provider: string) {
@@ -374,8 +539,15 @@ function LlmKeysSection() {
     load();
   }
 
+  const hasStale = staleProviders.length > 0;
+
   return (
     <div className="space-y-4">
+      {hasStale && (
+        <div className="rounded-lg border border-amber-400 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-500 dark:bg-amber-500/10 dark:text-amber-200">
+          Certaines clés n’ont pas été renouvelées depuis plus de 60 jours. Pensez à les regénérer pour éviter les coupures.
+        </div>
+      )}
       {PROVIDERS.map((p) => (
         <div key={p.id} className="rounded-xl border p-4 dark:border-zinc-700">
           <div className="mb-2 flex items-center justify-between">
