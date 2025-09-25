@@ -85,6 +85,7 @@ export default async function DashboardPage() {
     recentProjects,
     analysisTimelineRows,
     projectCreationRows,
+    projectsActiveLast30Days,
   ] = await Promise.all([
     prisma.project.count(),
     prisma.domain.count(),
@@ -135,6 +136,17 @@ export default async function DashboardPage() {
       where: { createdAt: { gte: thirtyDaysAgo } },
       select: { createdAt: true },
     }),
+    prisma.project.count({
+      where: {
+        analyses: {
+          some: {
+            createdAt: {
+              gte: thirtyDaysAgo,
+            },
+          },
+        },
+      },
+    }),
   ]);
 
   const competitorFrequency = new Map<string, number>();
@@ -163,6 +175,14 @@ export default async function DashboardPage() {
   const projectSeries = buildDailySeries(projectCreationRows.map((row) => row.createdAt));
   const coverageSeries = buildDailySeries(domainRows.map((row) => row.updatedAt));
   const coverageUpdatesLast30 = coverageSeries.reduce((sum, point) => sum + point.value, 0);
+  const totalCompetitorCount = coverage.reduce((sum, item) => sum + item.competitorCount, 0);
+  const avgCompetitorsPerDomain = coverage.length > 0 ? totalCompetitorCount / coverage.length : 0;
+  const analysesPerProject = projectCount > 0 ? analysisCount / projectCount : 0;
+  const analysisVelocity = analysesLast30Days / 30;
+  const activeProjectsRate =
+    projectCount > 0 ? Math.round((projectsActiveLast30Days / projectCount) * 100) : 0;
+  const coverageRefreshRate =
+    domainCount > 0 ? Math.round((coverageUpdatesLast30 / domainCount) * 100) : 0;
 
   const analyses = recentAnalyses
     .map((row) => {
@@ -214,6 +234,43 @@ export default async function DashboardPage() {
           value={competitorFrequency.size}
           helper={`Entrées uniques toutes marques • ${coverageUpdatesLast30} mises à jour sur 30j`}
           trend={{ series: coverageSeries, label: describeTrend(coverageSeries, "mise à jour", "mises à jour") }}
+        />
+      </section>
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <KPIHighlight
+          title="Activation projets (30j)"
+          value={projectCount > 0 ? `${projectsActiveLast30Days}/${projectCount}` : "0"}
+          subtitle={
+            projectCount > 0
+              ? `${activeProjectsRate}% du portefeuille a généré au moins une analyse récemment`
+              : "Aucun projet suivi pour le moment"
+          }
+          progress={activeProjectsRate}
+          accent="emerald"
+        />
+        <KPIHighlight
+          title="Cadence d’analyse"
+          value={`${analysisVelocity.toFixed(1)}/jour`}
+          subtitle="Nombre moyen d’analyses générées chaque jour sur 30j"
+          accent="indigo"
+        />
+        <KPIHighlight
+          title="Analyses par projet"
+          value={projectCount > 0 ? analysesPerProject.toFixed(1) : "—"}
+          subtitle="Moyenne cumulée depuis le lancement"
+          accent="violet"
+        />
+        <KPIHighlight
+          title="Couverture concurrentielle"
+          value={domainCount > 0 ? avgCompetitorsPerDomain.toFixed(1) : "—"}
+          subtitle={
+            domainCount > 0
+              ? `${coverageRefreshRate}% des domaines mis à jour sur 30j`
+              : "Aucun domaine cartographié pour l’instant"
+          }
+          progress={coverageRefreshRate}
+          accent="amber"
         />
       </section>
 
@@ -354,6 +411,76 @@ function Sparkline({ series }: { series: DailyPoint[] }) {
           />
         );
       })}
+    </div>
+  );
+}
+
+type KPIAccent = "indigo" | "emerald" | "amber" | "violet";
+
+function KPIHighlight({
+  title,
+  value,
+  subtitle,
+  progress,
+  accent = "indigo",
+}: {
+  title: string;
+  value: string;
+  subtitle: string;
+  progress?: number;
+  accent?: KPIAccent;
+}) {
+  const accents: Record<KPIAccent, { badge: string; bar: string }> = {
+    indigo: {
+      badge: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-300",
+      bar: "bg-indigo-500 dark:bg-indigo-400",
+    },
+    emerald: {
+      badge: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-300",
+      bar: "bg-emerald-500 dark:bg-emerald-400",
+    },
+    amber: {
+      badge: "bg-amber-500/10 text-amber-600 dark:text-amber-300",
+      bar: "bg-amber-500 dark:bg-amber-400",
+    },
+    violet: {
+      badge: "bg-violet-500/10 text-violet-600 dark:text-violet-300",
+      bar: "bg-violet-500 dark:bg-violet-400",
+    },
+  };
+
+  const palette = accents[accent] ?? accents.indigo;
+  const hasProgress = typeof progress === "number" && Number.isFinite(progress);
+  const clampedProgress = hasProgress
+    ? Math.max(0, Math.min(100, Math.round(progress as number)))
+    : null;
+
+  return (
+    <div className="space-y-3 rounded-2xl border p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-950/40">
+      <span
+        className={`inline-flex w-fit items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] ${palette.badge}`}
+      >
+        KPI
+      </span>
+      <div>
+        <p className="text-sm font-semibold">{title}</p>
+        <p className="mt-2 text-2xl font-semibold">{value}</p>
+      </div>
+      <p className="text-xs text-muted-foreground">{subtitle}</p>
+      {clampedProgress !== null && (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            <span>Progression</span>
+            <span>{clampedProgress}%</span>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-zinc-800">
+            <div
+              className={`h-full rounded-full ${palette.bar}`}
+              style={{ width: `${clampedProgress}%` }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
