@@ -24,6 +24,53 @@ function formatRelative(iso: string) {
   }).format(date);
 }
 
+type DailyPoint = {
+  date: string;
+  label: string;
+  value: number;
+};
+
+function buildDailySeries(dates: Array<Date | string>, span = 30): DailyPoint[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const start = new Date(today);
+  start.setDate(start.getDate() - (span - 1));
+
+  const counts = new Array(span).fill(0);
+  for (const raw of dates) {
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) continue;
+    date.setHours(0, 0, 0, 0);
+    const diff = Math.floor((date.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+    if (diff >= 0 && diff < span) counts[diff] += 1;
+  }
+
+  const formatter = new Intl.DateTimeFormat("fr-FR", { day: "2-digit", month: "short" });
+  return counts.map((value, idx) => {
+    const pointDate = new Date(start);
+    pointDate.setDate(start.getDate() + idx);
+    return {
+      date: pointDate.toISOString(),
+      label: formatter.format(pointDate),
+      value,
+    } satisfies DailyPoint;
+  });
+}
+
+function describeTrend(points: DailyPoint[], noun: string, pluralOverride?: string) {
+  if (points.length === 0) return "Aucune donnée sur 30j";
+  const half = Math.max(1, Math.floor(points.length / 2));
+  const early = points.slice(0, half).reduce((sum, point) => sum + point.value, 0);
+  const late = points.slice(half).reduce((sum, point) => sum + point.value, 0);
+  const diff = late - early;
+  if (diff === 0) return "Stable sur 30j";
+  const direction = diff > 0 ? "+" : "−";
+  const abs = Math.abs(diff);
+  const nounToUse = abs > 1 ? pluralOverride ?? `${noun}s` : noun;
+  return `${direction}${abs} ${nounToUse} vs début`;
+}
+
 export default async function DashboardPage() {
   const now = new Date();
   const thirtyDaysAgo = new Date(now.getTime() - 1000 * 60 * 60 * 24 * 30);
@@ -36,6 +83,8 @@ export default async function DashboardPage() {
     recentAnalyses,
     domainRows,
     recentProjects,
+    analysisTimelineRows,
+    projectCreationRows,
   ] = await Promise.all([
     prisma.project.count(),
     prisma.domain.count(),
@@ -56,6 +105,7 @@ export default async function DashboardPage() {
         id: true,
         name: true,
         competitors: true,
+        createdAt: true,
         updatedAt: true,
         project: { select: { id: true, name: true } },
       },
@@ -75,6 +125,15 @@ export default async function DashboardPage() {
           select: { createdAt: true },
         },
       },
+    }),
+    prisma.projectAnalysis.findMany({
+      where: { createdAt: { gte: thirtyDaysAgo } },
+      select: { createdAt: true },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.project.findMany({
+      where: { createdAt: { gte: thirtyDaysAgo } },
+      select: { createdAt: true },
     }),
   ]);
 
@@ -98,6 +157,12 @@ export default async function DashboardPage() {
   const topCompetitors = Array.from(competitorFrequency.entries())
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
+
+  const analysisSeries = buildDailySeries(analysisTimelineRows.map((row) => row.createdAt));
+  const domainSeries = buildDailySeries(domainRows.map((row) => row.createdAt));
+  const projectSeries = buildDailySeries(projectCreationRows.map((row) => row.createdAt));
+  const coverageSeries = buildDailySeries(domainRows.map((row) => row.updatedAt));
+  const coverageUpdatesLast30 = coverageSeries.reduce((sum, point) => sum + point.value, 0);
 
   const analyses = recentAnalyses
     .map((row) => {
@@ -126,21 +191,29 @@ export default async function DashboardPage() {
   return (
     <div className="space-y-8">
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Projets actifs" value={projectCount} helper="Nombre total de marques suivies" />
+        <StatCard
+          label="Projets actifs"
+          value={projectCount}
+          helper="Nombre total de marques suivies"
+          trend={{ series: projectSeries, label: describeTrend(projectSeries, "projet") }}
+        />
         <StatCard
           label="Domaines cartographiés"
           value={domainCount}
           helper={`Dont ${domainsWithoutCompetitors} à enrichir`}
+          trend={{ series: domainSeries, label: describeTrend(domainSeries, "domaine") }}
         />
         <StatCard
           label="Analyses générées"
           value={analysisCount}
           helper={`${analysesLast30Days} sur les 30 derniers jours`}
+          trend={{ series: analysisSeries, label: describeTrend(analysisSeries, "analyse") }}
         />
         <StatCard
           label="Concurrents référencés"
           value={competitorFrequency.size}
-          helper="Entrées uniques toutes marques"
+          helper={`Entrées uniques toutes marques • ${coverageUpdatesLast30} mises à jour sur 30j`}
+          trend={{ series: coverageSeries, label: describeTrend(coverageSeries, "mise à jour", "mises à jour") }}
         />
       </section>
 
@@ -242,16 +315,45 @@ function StatCard({
   label,
   value,
   helper,
+  trend,
 }: {
   label: string;
   value: number;
   helper?: string;
+  trend?: { series: DailyPoint[]; label: string };
 }) {
   return (
     <div className="rounded-2xl border p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-950/40">
       <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="mt-2 text-3xl font-semibold">{value}</p>
       {helper && <p className="mt-1 text-xs text-muted-foreground">{helper}</p>}
+      {trend && (
+        <div className="mt-4 space-y-1">
+          <Sparkline series={trend.series} />
+          <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">{trend.label}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Sparkline({ series }: { series: DailyPoint[] }) {
+  if (series.length === 0) return null;
+  const max = Math.max(...series.map((point) => point.value), 1);
+  return (
+    <div className="flex h-12 items-end gap-[3px]" aria-hidden>
+      {series.map((point) => {
+        const ratio = point.value / max;
+        const height = Math.max(4, Math.round(ratio * 100));
+        return (
+          <div
+            key={point.date}
+            className="flex-1 rounded-t-md bg-gradient-to-t from-indigo-500/70 via-indigo-500/40 to-indigo-500/20 dark:from-indigo-400/70 dark:via-indigo-400/40 dark:to-indigo-400/20"
+            style={{ height: `${height}%` }}
+            title={`${point.value} le ${point.label}`}
+          />
+        );
+      })}
     </div>
   );
 }
