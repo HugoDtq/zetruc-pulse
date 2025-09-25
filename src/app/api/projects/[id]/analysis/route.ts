@@ -362,6 +362,8 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const url = new URL(req.url);
+  const runId = url.searchParams.get("runId");
 
   const [latest, historyRows] = await Promise.all([
     prisma.projectAnalysis.findFirst({
@@ -379,28 +381,64 @@ export async function GET(
     return NextResponse.json({ parsed: null, history: [] });
   }
 
+  let target = latest;
+
+  if (runId && runId !== latest.id) {
+    const requested = await prisma.projectAnalysis.findFirst({
+      where: { id: runId, projectId: id },
+    });
+
+    if (!requested) {
+      return NextResponse.json(
+        { error: "ANALYSIS_NOT_FOUND" },
+        { status: 404 }
+      );
+    }
+
+    target = requested;
+  }
+
   try {
-    const parsed = AnalysisReportSchema.parse(latest.report);
-    const history = historyRows
-      .map((row) => {
-        const parsedRow = AnalysisReportSchema.safeParse(row.report);
-        if (!parsedRow.success) return null;
-        return {
-          id: row.id,
-          createdAt: row.createdAt.toISOString(),
-          summary: summarizeAnalysis(parsedRow.data),
-        };
-      })
-      .filter((entry): entry is {
-        id: string;
-        createdAt: string;
-        summary: ReturnType<typeof summarizeAnalysis>;
-      } => Boolean(entry));
+    const parsed = AnalysisReportSchema.parse(target.report);
+    const currentSummary = summarizeAnalysis(parsed);
+
+    const historyMap = new Map<string, {
+      id: string;
+      createdAt: string;
+      summary: ReturnType<typeof summarizeAnalysis>;
+    }>();
+
+    for (const row of historyRows) {
+      const parsedRow = AnalysisReportSchema.safeParse(row.report);
+      if (!parsedRow.success) continue;
+      historyMap.set(row.id, {
+        id: row.id,
+        createdAt: row.createdAt.toISOString(),
+        summary: summarizeAnalysis(parsedRow.data),
+      });
+    }
+
+    if (!historyMap.has(target.id)) {
+      historyMap.set(target.id, {
+        id: target.id,
+        createdAt: target.createdAt.toISOString(),
+        summary: currentSummary,
+      });
+    }
+
+    const history = Array.from(historyMap.values())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 5);
 
     return NextResponse.json({
       parsed,
-      createdAt: latest.createdAt.toISOString(),
+      createdAt: target.createdAt.toISOString(),
       history,
+      run: {
+        id: target.id,
+        createdAt: target.createdAt.toISOString(),
+        summary: currentSummary,
+      },
     });
   } catch (error: unknown) {
     console.error("⚠️ Analyse enregistrée invalide", error);

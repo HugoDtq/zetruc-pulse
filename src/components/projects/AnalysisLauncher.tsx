@@ -31,6 +31,8 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
   const [initializing, setInitializing] = useState(true);
   const [history, setHistory] = useState<AnalysisHistoryItem[]>([]);
   const [lastRunAt, setLastRunAt] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [loadingHistoryId, setLoadingHistoryId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,10 +58,16 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
         if (payload?.history) {
           setHistory(payload.history);
         }
-        if (payload?.createdAt) {
-          setLastRunAt(payload.createdAt);
+        const runCreatedAt = payload?.run?.createdAt ?? payload?.createdAt;
+        if (runCreatedAt) {
+          setLastRunAt(runCreatedAt);
         } else if (payload?.history?.length) {
           setLastRunAt(payload.history[0].createdAt);
+        }
+        if (payload?.run?.id) {
+          setActiveRunId(payload.run.id);
+        } else if (payload?.history?.length) {
+          setActiveRunId(payload.history[0].id);
         }
       } catch (error: unknown) {
         console.error(error);
@@ -124,6 +132,7 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
           return next.slice(0, 5);
         });
         setLastRunAt(payload.run.createdAt);
+        setActiveRunId(payload.run.id);
       }
     } catch (error: unknown) {
       if (error instanceof Error) {
@@ -137,6 +146,72 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
   }
 
   const summary = useMemo(() => (data ? summarizeAnalysis(data) : null), [data]);
+
+  async function loadRun(runId: string) {
+    setLoadingHistoryId(runId);
+    setError(null);
+
+    try {
+      const res = await fetch(`/api/projects/${projectId}/analysis?runId=${runId}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      const text = await res.text();
+      let payload: AnalysisApiResponse | null = null;
+
+      try {
+        payload = JSON.parse(text) as AnalysisApiResponse;
+      } catch {
+        throw new Error(
+          `La réponse n'est pas un JSON valide.\nStatus: ${res.status}\nAperçu:\n${text.slice(0, 600)}`
+        );
+      }
+
+      if (!res.ok) {
+        const detail =
+          payload?.detailPreview ||
+          payload?.chatPreview ||
+          payload?.detail ||
+          payload?.error ||
+          JSON.stringify(payload).slice(0, 600);
+
+        throw new Error(`API error (${res.status}): ${detail}`);
+      }
+
+      if (!payload?.parsed) {
+        throw new Error(
+          `Réponse inattendue: manque "parsed". Aperçu: ${JSON.stringify(payload).slice(0, 400)}`
+        );
+      }
+
+      setData(payload.parsed);
+      if (payload.history) {
+        setHistory(payload.history);
+      }
+      if (payload.run?.id) {
+        setActiveRunId(payload.run.id);
+      } else {
+        setActiveRunId(runId);
+      }
+
+      const runCreatedAt = payload.run?.createdAt ?? payload.createdAt;
+      if (runCreatedAt) {
+        setLastRunAt(runCreatedAt);
+      } else if (payload.history?.length) {
+        const found = payload.history.find((item) => item.id === (payload.run?.id ?? runId));
+        setLastRunAt(found?.createdAt ?? payload.history[0].createdAt);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError(String(err));
+      }
+    } finally {
+      setLoadingHistoryId(null);
+    }
+  }
 
   function formatDateTime(iso?: string | null) {
     if (!iso) return "—";
@@ -228,19 +303,44 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
             <div className="rounded-2xl border p-5 dark:border-zinc-800">
               <h4 className="text-sm font-semibold">Historique des analyses</h4>
               <ul className="mt-3 space-y-3 text-sm">
-                {history.map((item) => (
-                  <li key={item.id} className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <p className="font-medium">{formatDateTime(item.summary.generatedAt)}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {item.summary.mentionRate}% de visibilité • {item.summary.competitorCount} concurrents cités
-                      </p>
-                    </div>
-                    <span className="text-xs text-muted-foreground">
-                      {item.summary.sentiment}
-                    </span>
-                  </li>
-                ))}
+                {history.map((item) => {
+                  const isActive = activeRunId === item.id;
+                  const isLoading = loadingHistoryId === item.id;
+
+                  return (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        onClick={() => loadRun(item.id)}
+                        disabled={isLoading || loading || initializing || isActive}
+                        className={`w-full rounded-xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 dark:border-zinc-800 ${
+                          isActive
+                            ? "border-primary/60 bg-primary/5"
+                            : "border-transparent hover:border-zinc-200 dark:hover:border-zinc-700"
+                        } ${isLoading ? "opacity-60" : ""}`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="font-medium">{formatDateTime(item.summary.generatedAt)}</p>
+                              {isActive && (
+                                <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                                  affichée
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              {item.summary.mentionRate}% de visibilité • {item.summary.competitorCount} concurrents cités
+                            </p>
+                          </div>
+                          <span className="text-xs text-muted-foreground">
+                            {isLoading ? "Chargement…" : item.summary.sentiment}
+                          </span>
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
