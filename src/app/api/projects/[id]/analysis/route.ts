@@ -356,6 +356,79 @@ function deepFindText(obj: any): string | null {
   return null;
 }
 
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeAnalysisPayload(
+  raw: unknown,
+  metaFallback: { brand?: string | null; website?: string | null; city?: string | null }
+) {
+  if (!isRecord(raw)) {
+    throw new Error("MODEL_INVALID_JSON_ROOT");
+  }
+
+  const unwrapOrder = ["report", "data", "payload", "analysis", "result"] as const;
+  let candidate: Record<string, any> = raw;
+
+  for (const key of unwrapOrder) {
+    const inner = candidate[key];
+    if (isRecord(inner) && (isRecord(inner.part1) || isRecord(inner.meta))) {
+      candidate = inner;
+      break;
+    }
+  }
+
+  if (!isRecord(candidate.part1) && isRecord(candidate.analysis)) {
+    const inner = candidate.analysis;
+    if (isRecord(inner.part1) || isRecord(inner.meta)) {
+      candidate = inner;
+    }
+  }
+
+  const fallbackBrand = (metaFallback.brand ?? "").trim() || "—";
+  const fallbackWebsite = metaFallback.website?.toString().trim() || null;
+  const fallbackCity = metaFallback.city?.toString().trim() || null;
+  const fallbackGeneratedAt = new Date().toISOString();
+
+  const meta = isRecord(candidate.meta) ? candidate.meta : {};
+  candidate.meta = {
+    brand:
+      typeof meta.brand === "string" && meta.brand.trim()
+        ? meta.brand
+        : fallbackBrand,
+    website:
+      meta.website === null || typeof meta.website === "string"
+        ? (typeof meta.website === "string" ? meta.website.trim() : meta.website)
+        : fallbackWebsite,
+    ville:
+      meta.ville === null || typeof meta.ville === "string"
+        ? (typeof meta.ville === "string" ? meta.ville.trim() : meta.ville)
+        : fallbackCity,
+    generatedAt:
+      typeof meta.generatedAt === "string" && meta.generatedAt
+        ? meta.generatedAt
+        : fallbackGeneratedAt,
+    sources: Array.isArray(meta.sources)
+      ? meta.sources.map((s: any) => s?.toString?.() ?? String(s))
+      : [],
+  };
+
+  if (!candidate.meta.website && fallbackWebsite) {
+    candidate.meta.website = fallbackWebsite;
+  }
+
+  if (!candidate.meta.ville && fallbackCity) {
+    candidate.meta.ville = fallbackCity;
+  }
+
+  if (!candidate.meta.brand) {
+    candidate.meta.brand = fallbackBrand;
+  }
+
+  return candidate;
+}
+
 /* --------------------- Handler --------------------- */
 export async function GET(
   req: Request,
@@ -620,7 +693,12 @@ export async function POST(
     console.log("🔍 part2.present:", parsed.part2?.present);
     console.log("🔍 part2.positionnementConcurrentiel:", parsed.part2?.positionnementConcurrentiel);
     
-    const safe = AnalysisReportSchema.parse(parsed);
+    const normalized = normalizeAnalysisPayload(parsed, {
+      brand: project.name,
+      website: project.websiteUrl,
+      city: project.city,
+    });
+    const safe = AnalysisReportSchema.parse(normalized);
     // Le generatedAt est maintenant fourni par le modèle, pas besoin de l'écraser
 
     const created = await prisma.projectAnalysis.create({
