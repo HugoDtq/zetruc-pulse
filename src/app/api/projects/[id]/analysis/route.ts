@@ -6,6 +6,116 @@ import { AnalysisReportSchema, stripCodeFences } from "@/types/analysis";
 import { summarizeAnalysis } from "@/lib/analysisSummary";
 import { getOpenAIKey } from "@/lib/llm";
 
+const ANALYSIS_MODEL = "gpt-5";
+
+const ANALYSIS_RESPONSE_FORMAT = {
+  type: "json_schema" as const,
+  json_schema: {
+    name: "analysis_report",
+    schema: {
+      type: "object",
+      additionalProperties: true,
+      required: ["part1", "part3", "meta"],
+      properties: {
+        part1: {
+          type: "object",
+          additionalProperties: true,
+          required: [
+            "syntheseIdentite",
+            "wordCloud",
+            "sentimentGlobal",
+            "forces",
+            "faiblesses",
+            "sujetsPrincipaux",
+            "recommandations",
+          ],
+          properties: {
+            syntheseIdentite: {
+              type: "array",
+              items: { type: "string" },
+              minItems: 5,
+            },
+            wordCloud: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: true,
+                required: ["mot", "poids"],
+                properties: {
+                  mot: { type: "string" },
+                  poids: { type: "number" },
+                },
+              },
+            },
+            sentimentGlobal: {
+              type: "object",
+              additionalProperties: true,
+              required: ["label", "justification"],
+              properties: {
+                label: {
+                  type: "string",
+                  enum: ["Positive", "Neutre", "Négative", "Mixte"],
+                },
+                justification: { type: "string" },
+              },
+            },
+            forces: { type: "array", items: { type: "string" } },
+            faiblesses: { type: "array", items: { type: "string" } },
+            sujetsPrincipaux: { type: "array", items: { type: "string" } },
+            recommandations: { type: "array", items: { type: "string" } },
+          },
+        },
+        part2: {
+          type: "object",
+          additionalProperties: true,
+          properties: {
+            present: { type: "boolean" },
+            positionnementConcurrentiel: {
+              type: "object",
+              additionalProperties: true,
+            },
+          },
+        },
+        part3: {
+          type: "object",
+          additionalProperties: true,
+          required: ["questions", "noteMethodo"],
+          properties: {
+            questions: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: true,
+                required: ["question", "mentionProbable", "justification", "reponseIA"],
+                properties: {
+                  question: { type: "string" },
+                  mentionProbable: { type: "string" },
+                  justification: { type: "string" },
+                  concurrentsCites: {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                  reponseIA: { type: "string" },
+                },
+              },
+            },
+            noteMethodo: { type: "string" },
+          },
+        },
+        meta: {
+          type: "object",
+          additionalProperties: true,
+          required: ["brand", "generatedAt"],
+          properties: {
+            brand: { type: "string" },
+            generatedAt: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+};
+
 const prisma = new PrismaClient();
 
 /* --------------------- Prompt mis à jour --------------------- */
@@ -263,19 +373,33 @@ function extractFirstJsonBlock(text: string) {
 }
 
 function softJsonRepair(s: string) {
-  let t = s;
-  // Nettoyer les caractères unicode problématiques
-  t = t.replace(/[""]/g, '"').replace(/['']/g, "'");
-  // Supprimer les virgules en trop
-  t = t.replace(/,\s*([}\]])/g, "$1");
-  // Supprimer les BOM
-  t = t.replace(/^\uFEFF/, "");
-  // Normaliser les retours à la ligne
-  t = t.replace(/\r\n?/g, "\n");
-  // Supprimer les commentaires JSON non-standards
-  t = t.replace(/\/\*.*?\*\//gs, '');
-  t = t.replace(/\/\/.*$/gm, '');
-  return t.trim();
+  let repaired = s
+    // Normaliser les guillemets typographiques fréquents
+    .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')
+    .replace(/[\u2018\u2019\u201A\u2032]/g, "'")
+    // Nettoyer les BOM et caractères nuls
+    .replace(/^\uFEFF/, "")
+    .replace(/\u0000/g, "")
+    // Normaliser les retours à la ligne
+    .replace(/\r\n?/g, "\n")
+    // Supprimer les commentaires JSON non-standards
+    .replace(/\/\*.*?\*\//gs, "")
+    .replace(/\/\/.*$/gm, "")
+    .trim();
+
+  // Supprimer les virgules finales courantes avant } ou ]
+  repaired = repaired.replace(/,\s*([}\]])/g, "$1");
+
+  // Remplacer les "true"/"false" mal capitalisés
+  repaired = repaired.replace(/\bTrue\b/g, "true").replace(/\bFalse\b/g, "false");
+
+  // Convertir les quotes simples utilisées pour encadrer les clés/valeurs simples
+  repaired = repaired.replace(/'([A-Za-z0-9_\-]+)'\s*:/g, '"$1":');
+  repaired = repaired.replace(/:\s*'([^']*)'/g, (_, value) =>
+    `: "${value.replace(/"/g, '\\"')}"`
+  );
+
+  return repaired;
 }
 
 function tryParseJsonLoose(raw: string) {
@@ -335,6 +459,10 @@ function deepFindText(obj: any): string | null {
     for (const out of obj.output) {
       if (Array.isArray(out?.content)) {
         for (const c of out.content) {
+          if (c && typeof c === "object" && "json" in c && c.json != null) {
+            if (typeof c.json === "string") return c.json;
+            if (isRecord(c.json) || Array.isArray(c.json)) return JSON.stringify(c.json);
+          }
           if (typeof c?.text === "string" && c.text.trim()) return c.text;
         }
       }
@@ -353,6 +481,39 @@ function deepFindText(obj: any): string | null {
       if (found) return found;
     }
   }
+  return null;
+}
+
+function deepFindJson(obj: any): any | null {
+  if (!obj) return null;
+
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = deepFindJson(item);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  if (isRecord(obj)) {
+    if ("json" in obj && obj.json != null) {
+      const candidate = (obj as any).json;
+      if (isRecord(candidate) || Array.isArray(candidate)) return candidate;
+      if (typeof candidate === "string") {
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    for (const key of Object.keys(obj)) {
+      const found = deepFindJson((obj as any)[key]);
+      if (found) return found;
+    }
+  }
+
   return null;
 }
 
@@ -579,17 +740,15 @@ export async function POST(
 
   // Responses API avec web_search OBLIGATOIRE (sans JSON mode)
   const body = {
-    model: "gpt-4o",
+    model: ANALYSIS_MODEL,
     input: [
       {
         role: "user",
         content: [{ type: "input_text", text: prompt }],
       },
     ],
-    text: { 
-      format: { 
-        type: "text" // Retour au mode text car web_search incompatible avec json_object
-      } 
+    text: {
+      format: ANALYSIS_RESPONSE_FORMAT,
     },
     reasoning: {},
     tools: [
@@ -629,47 +788,60 @@ export async function POST(
       );
     }
 
-    const modelText =
-      deepFindText(payload) ||
-      (Array.isArray(payload.output)
-        ? payload.output.flatMap((o: any) => (o?.content || []).map((c: any) => c?.text || "")).join("\n")
-        : "");
-
-    if (!modelText) {
-      console.error("❌ Aucun texte trouvé dans la réponse OpenAI");
-      return NextResponse.json(
-        { error: "MODEL_NO_TEXT", detailPreview: JSON.stringify(payload).slice(0, 1200) },
-        { status: 502 }
-      );
-    }
-
-    // Parse JSON avec réparations légères si besoin
-    console.log("=== DEBUG: Réponse OpenAI reçue ===");
-    console.log("Payload structure:", Object.keys(payload));
-    console.log("Model text preview:", modelText.substring(0, 500));
-    
+    const jsonPayload = deepFindJson(payload);
+    let modelText = "";
     let parsed: any;
-    try {
-      parsed = tryParseJsonLoose(modelText);
-    } catch (e: any) {
-      console.error("=== ERREUR PARSING JSON ===");
-      console.error("Erreur:", e.message);
-      console.error("Texte complet du modèle:", modelText);
-      console.error("Bloc JSON candidat:", extractFirstJsonBlock(modelText));
-      
-      return NextResponse.json(
-        {
-          error: "MODEL_BAD_JSON",
-          parseError: String(e?.message || e),
-          fullModelText: modelText, // TEMPORAIRE pour debug
-          candidatePreview: extractFirstJsonBlock(modelText).slice(0, 1200),
-        },
-        { status: 502 }
-      );
+
+    if (jsonPayload) {
+      console.log("✅ Contenu JSON détecté directement dans la réponse");
+      parsed = jsonPayload;
+      try {
+        modelText = JSON.stringify(jsonPayload);
+      } catch {
+        modelText = "[json object]";
+      }
+    } else {
+      modelText =
+        deepFindText(payload) ||
+        (Array.isArray(payload.output)
+          ? payload.output.flatMap((o: any) => (o?.content || []).map((c: any) => c?.text || "")).join("\n")
+          : "");
+
+      if (!modelText) {
+        console.error("❌ Aucun texte trouvé dans la réponse OpenAI");
+        return NextResponse.json(
+          { error: "MODEL_NO_TEXT", detailPreview: JSON.stringify(payload).slice(0, 1200) },
+          { status: 502 }
+        );
+      }
+
+      // Parse JSON avec réparations légères si besoin
+      console.log("=== DEBUG: Réponse OpenAI reçue ===");
+      console.log("Payload structure:", Object.keys(payload));
+      console.log("Model text preview:", modelText.substring(0, 500));
+
+      try {
+        parsed = tryParseJsonLoose(modelText);
+      } catch (e: any) {
+        console.error("=== ERREUR PARSING JSON ===");
+        console.error("Erreur:", e.message);
+        console.error("Texte complet du modèle:", modelText);
+        console.error("Bloc JSON candidat:", extractFirstJsonBlock(modelText));
+
+        return NextResponse.json(
+          {
+            error: "MODEL_BAD_JSON",
+            parseError: String(e?.message || e),
+            fullModelText: modelText, // TEMPORAIRE pour debug
+            candidatePreview: extractFirstJsonBlock(modelText).slice(0, 1200),
+          },
+          { status: 502 }
+        );
+      }
     }
 
     console.log("✅ JSON parsé avec succès");
-    
+
     // DEBUG: Vérifier si reponseIA est généré
     console.log("🔍 DEBUG: Structure des questions:");
     if (parsed.part3?.questions) {
