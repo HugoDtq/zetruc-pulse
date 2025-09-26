@@ -373,19 +373,33 @@ function extractFirstJsonBlock(text: string) {
 }
 
 function softJsonRepair(s: string) {
-  let t = s;
-  // Nettoyer les caractères unicode problématiques
-  t = t.replace(/[""]/g, '"').replace(/['']/g, "'");
-  // Supprimer les virgules en trop
-  t = t.replace(/,\s*([}\]])/g, "$1");
-  // Supprimer les BOM
-  t = t.replace(/^\uFEFF/, "");
-  // Normaliser les retours à la ligne
-  t = t.replace(/\r\n?/g, "\n");
-  // Supprimer les commentaires JSON non-standards
-  t = t.replace(/\/\*.*?\*\//gs, '');
-  t = t.replace(/\/\/.*$/gm, '');
-  return t.trim();
+  let repaired = s
+    // Normaliser les guillemets typographiques fréquents
+    .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')
+    .replace(/[\u2018\u2019\u201A\u2032]/g, "'")
+    // Nettoyer les BOM et caractères nuls
+    .replace(/^\uFEFF/, "")
+    .replace(/\u0000/g, "")
+    // Normaliser les retours à la ligne
+    .replace(/\r\n?/g, "\n")
+    // Supprimer les commentaires JSON non-standards
+    .replace(/\/\*.*?\*\//gs, "")
+    .replace(/\/\/.*$/gm, "")
+    .trim();
+
+  // Supprimer les virgules finales courantes avant } ou ]
+  repaired = repaired.replace(/,\s*([}\]])/g, "$1");
+
+  // Remplacer les "true"/"false" mal capitalisés
+  repaired = repaired.replace(/\bTrue\b/g, "true").replace(/\bFalse\b/g, "false");
+
+  // Convertir les quotes simples utilisées pour encadrer les clés/valeurs simples
+  repaired = repaired.replace(/'([A-Za-z0-9_\-]+)'\s*:/g, '"$1":');
+  repaired = repaired.replace(/:\s*'([^']*)'/g, (_, value) =>
+    `: "${value.replace(/"/g, '\\"')}"`
+  );
+
+  return repaired;
 }
 
 function tryParseJsonLoose(raw: string) {
