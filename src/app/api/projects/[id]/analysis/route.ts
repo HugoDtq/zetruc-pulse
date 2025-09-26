@@ -747,7 +747,9 @@ export async function POST(
         content: [{ type: "input_text", text: prompt }],
       },
     ],
-    response_format: ANALYSIS_RESPONSE_FORMAT,
+    text: {
+      format: ANALYSIS_RESPONSE_FORMAT,
+    },
     reasoning: {},
     tools: [
       {
