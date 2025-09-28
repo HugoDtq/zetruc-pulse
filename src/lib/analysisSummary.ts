@@ -8,6 +8,7 @@ export type AnalysisRunSummary = {
   mentionRate: number;
   competitorCount: number;
   competitorNames: string[];
+  provider?: AnalysisReport["meta"]["provider"];
 };
 
 export function summarizeAnalysis(report: AnalysisReport): AnalysisRunSummary {
@@ -31,5 +32,6 @@ export function summarizeAnalysis(report: AnalysisReport): AnalysisRunSummary {
     mentionRate,
     competitorCount: competitorNames.length,
     competitorNames,
+    provider: report.meta.provider,
   };
 }

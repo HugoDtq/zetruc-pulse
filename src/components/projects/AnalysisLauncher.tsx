@@ -1,15 +1,38 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import AnalysisTabs from "@/components/projects/AnalysisTabs";
 import type { AnalysisReport } from "@/types/analysis";
 import { summarizeAnalysis, type AnalysisRunSummary } from "@/lib/analysisSummary";
 
+const PROVIDER_LABELS = {
+  OPENAI: "OpenAI",
+  GEMINI: "Gemini",
+} as const;
+
+type SupportedProvider = keyof typeof PROVIDER_LABELS;
+
+const PROVIDER_STORAGE_KEY = "pulse.analysis.llm-provider";
+
+function isSupportedProvider(value: unknown): value is SupportedProvider {
+  if (typeof value !== "string") return false;
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, value);
+}
+
+function getProviderLabel(provider?: string | null) {
+  if (!provider) return null;
+  if (isSupportedProvider(provider)) {
+    return PROVIDER_LABELS[provider];
+  }
+  return provider;
+}
+
 type AnalysisHistoryItem = {
   id: string;
   createdAt: string;
   summary: AnalysisRunSummary;
+  provider?: AnalysisReport["meta"]["provider"];
 };
 
 type AnalysisApiResponse = {
@@ -21,6 +44,7 @@ type AnalysisApiResponse = {
   createdAt?: string;
   history?: AnalysisHistoryItem[];
   run?: AnalysisHistoryItem;
+  provider?: AnalysisReport["meta"]["provider"];
   [key: string]: unknown;
 };
 
@@ -33,6 +57,24 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
   const [lastRunAt, setLastRunAt] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [loadingHistoryId, setLoadingHistoryId] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<SupportedProvider>("OPENAI");
+  const [providerInitialized, setProviderInitialized] = useState(false);
+  const providerStorageLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+    if (isSupportedProvider(stored)) {
+      setSelectedProvider(stored);
+      providerStorageLoadedRef.current = true;
+    }
+    setProviderInitialized(true);
+  }, []);
+
+  useEffect(() => {
+    if (!providerInitialized || typeof window === "undefined") return;
+    window.localStorage.setItem(PROVIDER_STORAGE_KEY, selectedProvider);
+  }, [selectedProvider, providerInitialized]);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +99,14 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
         }
         if (payload?.history) {
           setHistory(payload.history);
+        }
+        if (
+          !providerStorageLoadedRef.current &&
+          payload?.provider &&
+          isSupportedProvider(payload.provider)
+        ) {
+          setSelectedProvider(payload.provider);
+          providerStorageLoadedRef.current = true;
         }
         const runCreatedAt = payload?.run?.createdAt ?? payload?.createdAt;
         if (runCreatedAt) {
@@ -92,6 +142,8 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
     try {
       const res = await fetch(`/api/projects/${projectId}/analysis`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: selectedProvider }),
       });
 
       const text = await res.text();
@@ -133,6 +185,7 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
         });
         setLastRunAt(payload.run.createdAt);
         setActiveRunId(payload.run.id);
+        providerStorageLoadedRef.current = true;
       }
     } catch (error: unknown) {
       if (error instanceof Error) {
@@ -146,6 +199,7 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
   }
 
   const summary = useMemo(() => (data ? summarizeAnalysis(data) : null), [data]);
+  const summaryProviderLabel = summary ? getProviderLabel(summary.provider ?? null) : null;
 
   async function loadRun(runId: string) {
     setLoadingHistoryId(runId);
@@ -232,8 +286,38 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
             {lastRunAt && (
               <p className="text-xs text-muted-foreground">Enregistrée le {formatDateTime(lastRunAt)}</p>
             )}
+            {summaryProviderLabel && (
+              <p className="text-xs text-muted-foreground">Analyse générée avec {summaryProviderLabel}</p>
+            )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <label
+                htmlFor="analysis-llm-provider"
+                className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+              >
+                Fournisseur
+              </label>
+              <select
+                id="analysis-llm-provider"
+                value={selectedProvider}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  if (isSupportedProvider(next)) {
+                    setSelectedProvider(next);
+                    providerStorageLoadedRef.current = true;
+                  }
+                }}
+                disabled={loading || initializing}
+                className="rounded-lg border px-2 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary dark:border-zinc-800 dark:bg-zinc-900"
+              >
+                {Object.entries(PROVIDER_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </div>
             <Button onClick={run} disabled={loading || initializing}>
               {loading ? "Analyse en cours…" : data ? "Relancer l’analyse" : "Lancer l’analyse"}
             </Button>
@@ -306,6 +390,9 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
                 {history.map((item) => {
                   const isActive = activeRunId === item.id;
                   const isLoading = loadingHistoryId === item.id;
+                  const providerLabel = getProviderLabel(
+                    item.provider ?? item.summary.provider ?? null
+                  );
 
                   return (
                     <li key={item.id}>
@@ -328,9 +415,15 @@ export default function AnalysisLauncher({ projectId }: { projectId: string }) {
                                   affichée
                                 </span>
                               )}
+                              {providerLabel && (
+                                <span className="inline-flex items-center rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground dark:bg-zinc-800">
+                                  {providerLabel}
+                                </span>
+                              )}
                             </div>
                             <p className="text-xs text-muted-foreground">
                               {item.summary.mentionRate}% de visibilité • {item.summary.competitorCount} concurrents cités
+                              {providerLabel ? ` • ${providerLabel}` : ""}
                             </p>
                           </div>
                           <span className="text-xs text-muted-foreground">

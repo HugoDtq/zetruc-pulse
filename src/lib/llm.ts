@@ -3,9 +3,9 @@ import { decrypt } from "@/lib/crypto";
 
 const prisma = new PrismaClient();
 
-export async function getOpenAIKey(): Promise<string | null> {
+export async function getLlmKey(provider: LLMProvider): Promise<string | null> {
   const row = await prisma.llmApiKey.findUnique({
-    where: { provider: LLMProvider.OPENAI },
+    where: { provider },
   });
   if (!row) return null;
   try {
@@ -13,4 +13,8 @@ export async function getOpenAIKey(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+export async function getOpenAIKey(): Promise<string | null> {
+  return getLlmKey(LLMProvider.OPENAI);
 }
