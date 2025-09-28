@@ -1,7 +1,6 @@
-import { PrismaClient, LLMProvider } from "@prisma/client";
+import { LLMProvider } from "@prisma/client";
 import { decrypt } from "@/lib/crypto";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 export async function getLlmKey(provider: LLMProvider): Promise<string | null> {
   const row = await prisma.llmApiKey.findUnique({

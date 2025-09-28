@@ -1,12 +1,11 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { PrismaClient, Prisma, LLMProvider } from "@prisma/client";
+import { Prisma, LLMProvider } from "@prisma/client";
 import { AnalysisReportSchema, stripCodeFences } from "@/types/analysis";
 import { summarizeAnalysis } from "@/lib/analysisSummary";
 import { getLlmKey } from "@/lib/llm";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 const SUPPORTED_PROVIDERS = new Set<LLMProvider>([
   LLMProvider.OPENAI,
