@@ -1,12 +1,29 @@
 export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
-import { PrismaClient, Prisma } from "@prisma/client";
+import { Prisma, LLMProvider } from "@prisma/client";
 import { AnalysisReportSchema, stripCodeFences } from "@/types/analysis";
 import { summarizeAnalysis } from "@/lib/analysisSummary";
-import { getOpenAIKey } from "@/lib/llm";
+import { getLlmKey } from "@/lib/llm";
+import { prisma } from "@/lib/prisma";
 
-const prisma = new PrismaClient();
+const SUPPORTED_PROVIDERS = new Set<LLMProvider>([
+  LLMProvider.OPENAI,
+  LLMProvider.GEMINI,
+]);
+
+function parseProvider(value?: string | null): LLMProvider | null {
+  if (!value) return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  const upper = normalized.toUpperCase();
+  const match = (Object.values(LLMProvider) as string[]).find(
+    (p) => p.toUpperCase() === upper
+  );
+  if (!match) return null;
+  const provider = match as LLMProvider;
+  return SUPPORTED_PROVIDERS.has(provider) ? provider : null;
+}
 
 /* --------------------- Prompt mis à jour --------------------- */
 const PROMPT_EXACT = `
@@ -327,8 +344,37 @@ async function postJSON(url: string, body: any, apiKey: string) {
   return { ok: res.ok, status: res.status, text };
 }
 
+async function postGemini(body: any, apiKey: string) {
+  const url = new URL(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
+  );
+  url.searchParams.set("key", apiKey);
+
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  return { ok: res.ok, status: res.status, text };
+}
+
 function deepFindText(obj: any): string | null {
   if (!obj) return null;
+  if (typeof obj === "string") {
+    const trimmed = obj.trim();
+    return trimmed.length ? trimmed : null;
+  }
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = deepFindText(item);
+      if (found) return found;
+    }
+    return null;
+  }
   if (typeof obj.output_text === "string" && obj.output_text.trim()) return obj.output_text;
 
   if (Array.isArray(obj.output)) {
@@ -362,7 +408,8 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 function normalizeAnalysisPayload(
   raw: unknown,
-  metaFallback: { brand?: string | null; website?: string | null; city?: string | null }
+  metaFallback: { brand?: string | null; website?: string | null; city?: string | null },
+  provider?: LLMProvider
 ) {
   if (!isRecord(raw)) {
     throw new Error("MODEL_INVALID_JSON_ROOT");
@@ -392,6 +439,9 @@ function normalizeAnalysisPayload(
   const fallbackGeneratedAt = new Date().toISOString();
 
   const meta = isRecord(candidate.meta) ? candidate.meta : {};
+  const providerFromPayload =
+    typeof meta.provider === "string" ? parseProvider(meta.provider) : null;
+  const finalProvider = provider ?? providerFromPayload ?? null;
   candidate.meta = {
     brand:
       typeof meta.brand === "string" && meta.brand.trim()
@@ -412,6 +462,7 @@ function normalizeAnalysisPayload(
     sources: Array.isArray(meta.sources)
       ? meta.sources.map((s: any) => s?.toString?.() ?? String(s))
       : [],
+    provider: finalProvider ?? undefined,
   };
 
   if (!candidate.meta.website && fallbackWebsite) {
@@ -475,11 +526,15 @@ export async function GET(
     const parsed = AnalysisReportSchema.parse(target.report);
     const currentSummary = summarizeAnalysis(parsed);
 
-    const historyMap = new Map<string, {
-      id: string;
-      createdAt: string;
-      summary: ReturnType<typeof summarizeAnalysis>;
-    }>();
+    const historyMap = new Map<
+      string,
+      {
+        id: string;
+        createdAt: string;
+        summary: ReturnType<typeof summarizeAnalysis>;
+        provider: ReturnType<typeof summarizeAnalysis>["provider"];
+      }
+    >();
 
     for (const row of historyRows) {
       const parsedRow = AnalysisReportSchema.safeParse(row.report);
@@ -488,6 +543,7 @@ export async function GET(
         id: row.id,
         createdAt: row.createdAt.toISOString(),
         summary: summarizeAnalysis(parsedRow.data),
+        provider: parsedRow.data.meta.provider ?? null,
       });
     }
 
@@ -496,6 +552,7 @@ export async function GET(
         id: target.id,
         createdAt: target.createdAt.toISOString(),
         summary: currentSummary,
+        provider: currentSummary.provider ?? null,
       });
     }
 
@@ -511,7 +568,9 @@ export async function GET(
         id: target.id,
         createdAt: target.createdAt.toISOString(),
         summary: currentSummary,
+        provider: currentSummary.provider ?? null,
       },
+      provider: parsed.meta.provider ?? null,
     });
   } catch (error: unknown) {
     console.error("⚠️ Analyse enregistrée invalide", error);
@@ -561,10 +620,47 @@ export async function POST(
   
   console.log("🔍 DEBUG: Concurrents extraits:", competitors);
 
-  const apiKey = await getOpenAIKey();
+  const url = new URL(req.url);
+  const providerFromQuery = url.searchParams.get("provider");
+  let requestPayload: unknown = null;
+  if (req.headers.get("content-type")?.includes("application/json")) {
+    try {
+      requestPayload = await req.json();
+    } catch {
+      requestPayload = null;
+    }
+  }
+
+  const providerValue =
+    (requestPayload && typeof requestPayload === "object"
+      ? (requestPayload as Record<string, unknown>).provider
+      : undefined) ?? providerFromQuery ?? undefined;
+
+  const provider =
+    providerValue === undefined || providerValue === null || providerValue === ""
+      ? LLMProvider.OPENAI
+      : parseProvider(String(providerValue));
+
+  if (!provider) {
+    return NextResponse.json(
+      {
+        error: "UNKNOWN_PROVIDER",
+        detail: `Le fournisseur spécifié (${String(providerValue)}) n'est pas supporté.`,
+      },
+      { status: 400 }
+    );
+  }
+
+  const providerLabel = provider === LLMProvider.OPENAI ? "OpenAI" : "Gemini";
+
+  const apiKey = await getLlmKey(provider);
   if (!apiKey) {
     return NextResponse.json(
-      { error: "Clé OpenAI manquante (Superadmin)" },
+      {
+        error: "MISSING_PROVIDER_KEY",
+        detail: `Clé ${providerLabel} manquante (Superadmin)`,
+        provider,
+      },
       { status: 500 }
     );
   }
@@ -577,77 +673,147 @@ export async function POST(
     competitors,
   });
 
-  // Responses API avec web_search OBLIGATOIRE (sans JSON mode)
-  const body = {
-    model: "gpt-4o",
-    input: [
-      {
-        role: "user",
-        content: [{ type: "input_text", text: prompt }],
-      },
-    ],
-    text: { 
-      format: { 
-        type: "text" // Retour au mode text car web_search incompatible avec json_object
-      } 
-    },
-    reasoning: {},
-    tools: [
-      {
-        type: "web_search",
-        user_location: { type: "approximate" },
-        search_context_size: "medium",
-      },
-    ],
-    temperature: 0.6,
-    max_output_tokens: 8000, // Augmenté pour permettre plus de questions
-    top_p: 1,
-    store: false,
-    include: ["web_search_call.action.sources"],
-  };
-
   try {
-    console.log("🚀 Envoi de la requête à OpenAI Responses API...");
-    const r = await postJSON("https://api.openai.com/v1/responses", body, apiKey);
-    
-    if (!r.ok) {
-      console.error("❌ Erreur OpenAI:", r.status, r.text.slice(0, 500));
+    console.log(`🚀 Envoi de la requête à ${providerLabel}...`);
+    let payload: any = null;
+    let modelText = "";
+
+    if (provider === LLMProvider.OPENAI) {
+      // Responses API avec web_search OBLIGATOIRE (sans JSON mode)
+      const body = {
+        model: "gpt-4o",
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: prompt }],
+          },
+        ],
+        text: {
+          format: {
+            type: "text", // Retour au mode text car web_search incompatible avec json_object
+          },
+        },
+        reasoning: {},
+        tools: [
+          {
+            type: "web_search",
+            user_location: { type: "approximate" },
+            search_context_size: "medium",
+          },
+        ],
+        temperature: 0.6,
+        max_output_tokens: 8000, // Augmenté pour permettre plus de questions
+        top_p: 1,
+        store: false,
+        include: ["web_search_call.action.sources"],
+      };
+
+      const r = await postJSON("https://api.openai.com/v1/responses", body, apiKey);
+
+      if (!r.ok) {
+        console.error(`❌ Erreur ${providerLabel}:`, r.status, r.text.slice(0, 500));
+        return NextResponse.json(
+          {
+            error: "LLM_ERROR",
+            provider,
+            status: r.status,
+            detailPreview: r.text.slice(0, 1200),
+          },
+          { status: 502 }
+        );
+      }
+
+      try {
+        payload = JSON.parse(r.text);
+      } catch {
+        console.error(`❌ Impossible de parser la réponse ${providerLabel}`);
+        return NextResponse.json(
+          { error: "LLM_BAD_JSON", provider, detailPreview: r.text.slice(0, 1200) },
+          { status: 502 }
+        );
+      }
+
+      modelText =
+        deepFindText(payload) ||
+        (Array.isArray(payload.output)
+          ? payload.output
+              .flatMap((o: any) => (o?.content || []).map((c: any) => c?.text || ""))
+              .join("\n")
+          : "");
+    } else if (provider === LLMProvider.GEMINI) {
+      const body = {
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.6,
+          maxOutputTokens: 8000,
+        },
+      };
+
+      const r = await postGemini(body, apiKey);
+
+      if (!r.ok) {
+        console.error(`❌ Erreur ${providerLabel}:`, r.status, r.text.slice(0, 500));
+        return NextResponse.json(
+          {
+            error: "LLM_ERROR",
+            provider,
+            status: r.status,
+            detailPreview: r.text.slice(0, 1200),
+          },
+          { status: 502 }
+        );
+      }
+
+      try {
+        payload = JSON.parse(r.text);
+      } catch {
+        console.error(`❌ Impossible de parser la réponse ${providerLabel}`);
+        return NextResponse.json(
+          { error: "LLM_BAD_JSON", provider, detailPreview: r.text.slice(0, 1200) },
+          { status: 502 }
+        );
+      }
+
+      const candidateTexts = Array.isArray(payload.candidates)
+        ? payload.candidates
+            .flatMap((candidate: any) =>
+              Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []
+            )
+            .map((part: any) => (typeof part?.text === "string" ? part.text : ""))
+            .filter(Boolean)
+        : [];
+
+      modelText = deepFindText(payload) || candidateTexts.join("\n");
+    } else {
       return NextResponse.json(
-        { error: "OpenAI error", status: r.status, detailPreview: r.text.slice(0, 1200) },
-        { status: 502 }
+        { error: "UNSUPPORTED_PROVIDER", provider },
+        { status: 400 }
       );
     }
-
-    let payload: any;
-    try {
-      payload = JSON.parse(r.text);
-    } catch {
-      console.error("❌ Impossible de parser la réponse OpenAI");
-      return NextResponse.json(
-        { error: "OPENAI_BAD_JSON", detailPreview: r.text.slice(0, 1200) },
-        { status: 502 }
-      );
-    }
-
-    const modelText =
-      deepFindText(payload) ||
-      (Array.isArray(payload.output)
-        ? payload.output.flatMap((o: any) => (o?.content || []).map((c: any) => c?.text || "")).join("\n")
-        : "");
 
     if (!modelText) {
-      console.error("❌ Aucun texte trouvé dans la réponse OpenAI");
+      console.error(`❌ Aucun texte trouvé dans la réponse ${providerLabel}`);
       return NextResponse.json(
-        { error: "MODEL_NO_TEXT", detailPreview: JSON.stringify(payload).slice(0, 1200) },
+        {
+          error: "MODEL_NO_TEXT",
+          provider,
+          detailPreview: JSON.stringify(payload ?? {}).slice(0, 1200),
+        },
         { status: 502 }
       );
     }
 
-    // Parse JSON avec réparations légères si besoin
-    console.log("=== DEBUG: Réponse OpenAI reçue ===");
-    console.log("Payload structure:", Object.keys(payload));
+    console.log(`=== DEBUG: Réponse ${providerLabel} reçue ===`);
+    if (payload && typeof payload === "object") {
+      console.log("Payload structure:", Object.keys(payload));
+    }
     console.log("Model text preview:", modelText.substring(0, 500));
-    
+
     let parsed: any;
     try {
       parsed = tryParseJsonLoose(modelText);
@@ -656,10 +822,11 @@ export async function POST(
       console.error("Erreur:", e.message);
       console.error("Texte complet du modèle:", modelText);
       console.error("Bloc JSON candidat:", extractFirstJsonBlock(modelText));
-      
+
       return NextResponse.json(
         {
           error: "MODEL_BAD_JSON",
+          provider,
           parseError: String(e?.message || e),
           fullModelText: modelText, // TEMPORAIRE pour debug
           candidatePreview: extractFirstJsonBlock(modelText).slice(0, 1200),
@@ -669,37 +836,43 @@ export async function POST(
     }
 
     console.log("✅ JSON parsé avec succès");
-    
+
     // DEBUG: Vérifier si reponseIA est généré
     console.log("🔍 DEBUG: Structure des questions:");
     if (parsed.part3?.questions) {
       console.log(`Nombre de questions: ${parsed.part3.questions.length}`);
       console.log("Première question complète:", JSON.stringify(parsed.part3.questions[0], null, 2));
       console.log("Deuxième question complète:", JSON.stringify(parsed.part3.questions[1], null, 2));
-      
+
       // Vérifier si reponseIA existe
       const hasReponseIA = parsed.part3.questions.some((q: any) => q.reponseIA);
       console.log(`🎯 Le champ reponseIA est présent: ${hasReponseIA}`);
-      
+
       if (hasReponseIA) {
         console.log("✅ reponseIA trouvé dans les données");
       } else {
         console.log("❌ reponseIA manquant - le modèle n'a pas généré ce champ");
       }
     }
-    
+
     // DEBUG: Vérifier la structure part2
     console.log("🔍 DEBUG part2:", JSON.stringify(parsed.part2, null, 2));
     console.log("🔍 part2.present:", parsed.part2?.present);
-    console.log("🔍 part2.positionnementConcurrentiel:", parsed.part2?.positionnementConcurrentiel);
-    
-    const normalized = normalizeAnalysisPayload(parsed, {
-      brand: project.name,
-      website: project.websiteUrl,
-      city: project.city,
-    });
+    console.log(
+      "🔍 part2.positionnementConcurrentiel:",
+      parsed.part2?.positionnementConcurrentiel
+    );
+
+    const normalized = normalizeAnalysisPayload(
+      parsed,
+      {
+        brand: project.name,
+        website: project.websiteUrl,
+        city: project.city,
+      },
+      provider
+    );
     const safe = AnalysisReportSchema.parse(normalized);
-    // Le generatedAt est maintenant fourni par le modèle, pas besoin de l'écraser
 
     const created = await prisma.projectAnalysis.create({
       data: {
@@ -717,13 +890,15 @@ export async function POST(
         id: created.id,
         createdAt: created.createdAt.toISOString(),
         summary,
+        provider: summary.provider ?? null,
       },
+      provider: safe.meta.provider ?? null,
     });
 
   } catch (e: any) {
-    console.error("💥 Erreur générale:", e);
+    console.error(`💥 Erreur générale (${providerLabel}):`, e);
     return NextResponse.json(
-      { error: "Generation failed", detailPreview: String(e?.message || e) },
+      { error: "Generation failed", detailPreview: String(e?.message || e), provider },
       { status: 500 }
     );
   }

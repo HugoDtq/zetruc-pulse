@@ -1,6 +1,9 @@
 // src/types/analysis.ts
 import { z } from "zod";
 
+export const SupportedLlmProvider = z.enum(["OPENAI", "GEMINI"]);
+export type SupportedLlmProvider = z.infer<typeof SupportedLlmProvider>;
+
 export const WordItem = z.object({
   mot: z.string(),
   poids: z.number().min(10).max(100),
@@ -21,6 +24,7 @@ export const AnalysisReportSchema = z.object({
     ville: z.string().optional().nullable(),
     generatedAt: z.string(), // ISO
     sources: z.array(z.string()).optional().default([]),
+    provider: SupportedLlmProvider.optional(),
   }),
   part1: z.object({
     syntheseIdentite: z.array(z.string()).min(1), // 5 phrases
